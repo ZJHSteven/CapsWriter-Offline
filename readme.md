@@ -79,6 +79,9 @@ LLM 角色既可以使用 Ollama 运行的本地模型，又可以用 API 访问
 -   **sensevoice**：本地模型，速度快，准确率稍逊。
 -   **paraformer**：本地兼容备份模型。
 
+> 云端模式需要先配置环境变量 `DASHSCOPE_API_KEY`。  
+> 例如（Windows PowerShell）：`$env:DASHSCOPE_API_KEY=\"你的密钥\"`
+
 
 ## ⚙️ 个性化配置
 

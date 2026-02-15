@@ -8,6 +8,7 @@
   - 服务端新增阿里云百炼实时适配器 `util/server/asr_aliyun_realtime.py`。
   - 服务端任务队列已拆分为麦克风/文件双队列，并实现麦克风优先调度。
   - `config.py` 已加入百炼配置项，并将默认模型切换为 `aliyun_realtime`。
+  - `readme.md` 已补充云端模式 `DASHSCOPE_API_KEY` 配置说明。
   - 新增资料策略文档 `docs/bailian_context7_strategy.md`。
 - 正在做：联调云端模式下的识别流程，并验证对现有输出链路的兼容性。
 - 下一步：
