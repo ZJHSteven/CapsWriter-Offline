@@ -14,8 +14,23 @@ class ServerConfig:
     addr = '0.0.0.0'
     port = '6016'
 
-    # 语音模型选择：'fun_asr_nano', 'sensevoice', 'paraformer'
-    model_type = 'fun_asr_nano'
+    # 语音模型选择：
+    # - 'aliyun_realtime'（阿里云百炼实时 WebSocket，云端识别）
+    # - 'fun_asr_nano' / 'sensevoice' / 'paraformer'（本地模型）
+    model_type = 'aliyun_realtime'
+
+    # 阿里云百炼实时 ASR 配置（model_type='aliyun_realtime' 时生效）
+    # 建议通过环境变量注入，避免把密钥写入代码：
+    #   DASHSCOPE_API_KEY=你的密钥
+    aliyun_api_key = os.getenv('DASHSCOPE_API_KEY', '')
+    aliyun_endpoint = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
+    aliyun_model = 'fun-asr-realtime-2025-11-07'
+    aliyun_source_language = 'auto'
+    aliyun_max_sentence_silence = 800
+    aliyun_enable_punctuation = True
+    aliyun_enable_itn = True
+    aliyun_connect_timeout = 20.0
+    aliyun_response_timeout = 40.0
 
     format_num = True       # 输出时是否将中文数字转为阿拉伯数字
     format_spell = True     # 输出时是否调整中英之间的空格
@@ -83,7 +98,7 @@ class ClientConfig:
     mic_seg_duration = 60       # 麦克风听写时分段长度：60秒
     mic_seg_overlap = 4         # 麦克风听写时分段重叠：4秒
 
-    file_seg_duration = 60      # 转录文件时分段长度
+    file_seg_duration = 12      # 转录文件时分段长度（调小以减少占用识别主链路的连续时长）
     file_seg_overlap = 4        # 转录文件时分段重叠
 
     file_save_srt = True        # 转录文件时是否保存 srt 字幕
@@ -147,4 +162,3 @@ class ClientConfig:
   {'key': 'f12', 'type': 'keyboard', 'suppress': True, 'hold_mode': True, 'enabled': True}, 
   {'key': 'x2', 'type': 'mouse', 'suppress': True, 'hold_mode': True, 'enabled': True}, 
 """
-

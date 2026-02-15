@@ -74,9 +74,10 @@ LLM 角色既可以使用 Ollama 运行的本地模型，又可以用 API 访问
 
 你可以在 `config.py` 的 `model_type` 中切换：
 
--   **funasr_nano**（默认推荐）：目前的旗舰模型，速度较快，准确率最高。
--   **sensevoice**：阿里新一代大模型，速度超快，准确率稍逊。
--   **paraformer**：v1 版本的主导模型，现主要作为兼容备份。
+-   **aliyun_realtime**（云端实时，当前默认）：接入阿里云百炼实时 WebSocket，适合低本地内存占用场景。
+-   **funasr_nano**：本地旗舰模型，速度较快，准确率高，但占用更多本地资源。
+-   **sensevoice**：本地模型，速度快，准确率稍逊。
+-   **paraformer**：本地兼容备份模型。
 
 
 ## ⚙️ 个性化配置

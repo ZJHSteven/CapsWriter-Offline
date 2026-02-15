@@ -23,7 +23,8 @@ class Cosmic:
     存储服务端运行时的共享状态：
     - sockets: WebSocket 连接字典，以 socket_id 为键
     - sockets_id: 跨进程的 socket ID 列表（由 Manager 创建）
-    - queue_in: 任务输入队列（主进程 -> 识别进程）
+    - queue_in_mic: 麦克风任务队列（主进程 -> 识别进程）
+    - queue_in_file: 文件转录任务队列（主进程 -> 识别进程）
     - queue_out: 结果输出队列（识别进程 -> 主进程）
     
     Note:
@@ -36,6 +37,7 @@ class Cosmic:
     # 跨进程共享的 socket ID 列表（需要用 Manager().list() 初始化）
     sockets_id: Optional[List] = None
     
-    # 消息队列
-    queue_in: Queue = Queue()
+    # 消息队列（拆分队列，确保麦克风实时任务优先）
+    queue_in_mic: Queue = Queue()
+    queue_in_file: Queue = Queue()
     queue_out: Queue = Queue()

@@ -58,12 +58,17 @@ async def message_handler(websocket, message: dict, cache: AudioCache) -> None:
     
     根据消息中的分段参数，将音频数据分段后提交到识别队列。
     """
-    queue_in = Cosmic.queue_in
-
     global status_mic
     source = message['source']
     is_final = message['is_final']
     is_start = not bool(cache.chunks)
+    if source == 'mic':
+        queue_in = Cosmic.queue_in_mic
+    elif source == 'file':
+        queue_in = Cosmic.queue_in_file
+    else:
+        logger.warning(f"未知音频来源 source={source}，按 file 队列处理")
+        queue_in = Cosmic.queue_in_file
 
     # 获取 id
     task_id = message['task_id']

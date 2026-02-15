@@ -29,6 +29,26 @@ def check_model() -> None:
     model_type = Config.model_type.lower()
     logger.debug(f"检查模型文件, 类型: {model_type}")
 
+    # 云端模式不依赖本地模型文件，改为检查 API Key 是否可用
+    if model_type == 'aliyun_realtime':
+        if not Config.aliyun_api_key:
+            error_msg = '''
+    [bold red]未检测到 DASHSCOPE_API_KEY，无法使用 aliyun_realtime 模式[/bold red]
+
+    请配置以下任一方式后重试：
+    1) 在系统环境变量中设置 DASHSCOPE_API_KEY
+    2) 在 config.py 的 ServerConfig.aliyun_api_key 中填写密钥（不推荐）
+            '''
+            logger.error("aliyun_realtime 模式缺少 API Key")
+            console.print(error_msg, style='bright_red')
+            if sys.stdin.isatty():
+                input('按回车退出')
+            sys.exit(1)
+
+        logger.info("aliyun_realtime 模式检查通过（已检测到 API Key）")
+        console.print('[green4]云端模式检查通过 (aliyun_realtime)', end='\n\n')
+        return
+
     # 根据模型类型确定需要检查的文件
     if model_type == 'fun_asr_nano':
         required_files = {
@@ -63,6 +83,7 @@ def check_model() -> None:
     [bold red]不支持的模型类型：{Config.model_type}[/bold red]
 
     请在 config.py 中将 ServerConfig.model_type 设置为：
+    - 'aliyun_realtime'
     - 'fun_asr_nano'
     - 'sensevoice'
     - 'paraformer'

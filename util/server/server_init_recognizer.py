@@ -1,5 +1,6 @@
 import time
 from multiprocessing import Queue
+import queue
 import signal
 import atexit
 from platform import system
@@ -8,6 +9,7 @@ from util.model_config import ParaformerArgs, ModelPaths, SenseVoiceArgs, FunASR
 from util.server.server_check_model import check_model
 from util.server.server_cosmic import console
 from util.server.server_recognize import recognize
+from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer
 from util.tools.empty_working_set import empty_current_working_set
 from util.logger import get_logger
 from util.fun_asr_gguf import create_asr_engine
@@ -49,7 +51,7 @@ def signal_handler(signum, frame):
 
 
 
-def init_recognizer(queue_in: Queue, queue_out: Queue, sockets_id):
+def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue, sockets_id):
     global _resources_initialized
 
     logger.info("识别子进程启动")
@@ -63,11 +65,18 @@ def init_recognizer(queue_in: Queue, queue_out: Queue, sockets_id):
     # 注册 atexit 处理器
     atexit.register(cleanup_recognizer_resources)
 
-    # 导入模块
-    with console.status("载入模块中…", spinner="bouncingBall", spinner_style="yellow"):
-        import sherpa_onnx
-    console.print('[green4]模块加载完成', end='\n\n')
-    logger.info("Sherpa-ONNX 模块加载完成")
+    model_type = Config.model_type.lower()
+    sherpa_onnx = None
+
+    # 云端模式不依赖 sherpa-onnx，本地模式才需要导入
+    if model_type in ('fun_asr_nano', 'sensevoice', 'paraformer'):
+        with console.status("载入模块中…", spinner="bouncingBall", spinner_style="yellow"):
+            import sherpa_onnx as _sherpa_onnx
+            sherpa_onnx = _sherpa_onnx
+        console.print('[green4]模块加载完成', end='\n\n')
+        logger.info("Sherpa-ONNX 模块加载完成")
+    else:
+        logger.info(f"当前模式 {model_type} 不需要加载 Sherpa-ONNX")
 
     # 载入语音模型
     console.print('[yellow]语音模型载入中', end='\r'); t1 = time.time()
@@ -77,9 +86,21 @@ def init_recognizer(queue_in: Queue, queue_out: Queue, sockets_id):
     check_model()
 
     # 根据配置选择模型类型
-    model_type = Config.model_type.lower()
     try:
-        if model_type == 'fun_asr_nano':
+        if model_type == 'aliyun_realtime':
+            logger.debug("使用阿里云百炼实时 ASR")
+            recognizer = AliyunRealtimeRecognizer(
+                api_key=Config.aliyun_api_key,
+                endpoint=Config.aliyun_endpoint,
+                model=Config.aliyun_model,
+                source_language=Config.aliyun_source_language,
+                max_sentence_silence=Config.aliyun_max_sentence_silence,
+                punctuation_enabled=Config.aliyun_enable_punctuation,
+                itn_enabled=Config.aliyun_enable_itn,
+                connect_timeout=Config.aliyun_connect_timeout,
+                response_timeout=Config.aliyun_response_timeout,
+            )
+        elif model_type == 'fun_asr_nano':
             logger.debug("使用 Fun-ASR-Nano 模型")
             # recognizer = sherpa_onnx.OfflineRecognizer.from_funasr_nano(
             #     **{key: value for key, value in FunASRNanoArgs.__dict__.items() if not key.startswith('_')}
@@ -98,7 +119,10 @@ def init_recognizer(queue_in: Queue, queue_out: Queue, sockets_id):
                 **{key: value for key, value in ParaformerArgs.__dict__.items() if not key.startswith('_')}
             )
         else:
-            error_msg = f"不支持的模型类型: {Config.model_type}，请选择 'fun_asr_nano'、'sensevoice' 或 'paraformer'"
+            error_msg = (
+                f"不支持的模型类型: {Config.model_type}，"
+                "请选择 'aliyun_realtime'、'fun_asr_nano'、'sensevoice' 或 'paraformer'"
+            )
             logger.error(error_msg)
             raise ValueError(error_msg)
     except Exception as e:
@@ -136,12 +160,16 @@ def init_recognizer(queue_in: Queue, queue_out: Queue, sockets_id):
     _resources_initialized = True
 
     while True:
-        # 从队列中获取任务消息
-        # 阻塞最多1秒，便于中断退出
+        # 任务调度策略：
+        # 1. 优先处理麦克风队列，保证实时听写响应
+        # 2. 文件转录走次级队列，避免长任务持续占用主链路
         try:
-            task = queue_in.get(timeout=1)
-        except:
-            continue
+            task = queue_in_mic.get_nowait()
+        except queue.Empty:
+            try:
+                task = queue_in_file.get(timeout=1)
+            except queue.Empty:
+                continue
 
         # 检查退出信号
         if task is None:
