@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 from pynput import keyboard, mouse
 
-from . import logger
+from util.logger import get_logger
 from util.client.shortcut.key_mapper import *
 from util.client.shortcut.key_mapper import KeyMapper
 from util.client.shortcut.emulator import ShortcutEmulator
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from util.client.shortcut.shortcut_config import Shortcut
     from util.client.state import ClientState
 
+logger = get_logger('client')
 
 
 class ShortcutManager:
@@ -70,7 +71,7 @@ class ShortcutManager:
 
     def _init_tasks(self) -> None:
         """初始化所有快捷键任务"""
-        from config_client import ClientConfig as Config
+        from config import ClientConfig as Config
 
         for shortcut in self.shortcuts:
             if not shortcut.enabled:

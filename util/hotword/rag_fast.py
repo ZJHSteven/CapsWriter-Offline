@@ -12,7 +12,9 @@ import numpy as np
 from typing import List, Dict, Tuple, Set, Union
 from collections import defaultdict
 import time
-from . import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 尝试导入 Numba
 try:
@@ -229,6 +231,8 @@ class FastRAG:
         if not input_phonemes: return []
 
         # DEBUG
+        from util.logger import get_logger
+        logger = get_logger('client')
         logger.debug(f"[DEBUG] FastRAG.search: input_phonemes type={type(input_phonemes)}, len={len(input_phonemes)}")
         if input_phonemes:
             logger.debug(f"[DEBUG] FastRAG.search: input_phonemes[0] type={type(input_phonemes[0])}, value={input_phonemes[0]}")

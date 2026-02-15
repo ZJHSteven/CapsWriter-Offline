@@ -11,7 +11,9 @@ from tkinter import ttk
 from typing import Optional, Callable
 
 from .toast_constants import DEFAULT_FONT_FAMILY
-from . import logger
+from .toast_logger import get_toast_logger
+
+logger = get_toast_logger(__name__)
 
 # DPI 感知设置（与 toast_base.py 保持一致）
 try:

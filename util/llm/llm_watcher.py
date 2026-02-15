@@ -18,8 +18,9 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from util.llm.llm_constants import WatcherConstants
 from util.llm.llm_role_formatter import RoleFormatter
-from . import logger
+from util.logger import get_logger
 
+logger = get_logger('client')
 
 
 class LLMFileWatcher(FileSystemEventHandler):
@@ -44,7 +45,7 @@ class LLMFileWatcher(FileSystemEventHandler):
         self._get_roles = get_roles
         
         self.observer = Observer()
-        from config_client import BASE_DIR
+        from config import BASE_DIR
         self.base_dir = Path(BASE_DIR)
         self.llm_dir = self.base_dir / 'LLM'
 

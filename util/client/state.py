@@ -22,8 +22,10 @@ if TYPE_CHECKING:
 from rich.console import Console
 from rich.theme import Theme
 
-from . import logger
+from util.logger import get_logger
 
+# 日志记录器
+logger = get_logger('client')
 
 # 配置 Rich console
 _theme = Theme({
@@ -190,7 +192,7 @@ class ClientState:
         Args:
             text: 输出文本内容
         """
-        from config_client import ClientConfig as Config
+        from config import ClientConfig as Config
         
         # 更新状态
         self.last_output_text = text

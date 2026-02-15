@@ -14,12 +14,14 @@ from typing import TYPE_CHECKING, Optional
 import websockets
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
-from config_client import ClientConfig as Config
-from . import logger
+from config import ClientConfig as Config
+from util.logger import get_logger
 
 if TYPE_CHECKING:
     from util.client.state import ClientState
 
+# 日志记录器
+logger = get_logger('client')
 
 
 class WebSocketManager:

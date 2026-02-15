@@ -12,8 +12,10 @@ from pathlib import Path
 
 from util.client.state import console
 from util.tools import srt_from_txt
-from . import logger
+from util.logger import get_logger
 
+# 日志记录器
+logger = get_logger('client')
 
 
 class SrtAdjuster:

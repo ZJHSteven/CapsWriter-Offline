@@ -15,9 +15,6 @@
 """
 
 from util.server.server_cosmic import Cosmic, console
-from util import get_logger
-logger = get_logger('server')
-
 from util.server.server_classes import Task, Result
 
 __all__ = [

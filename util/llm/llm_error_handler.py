@@ -12,7 +12,9 @@ from util.llm.llm_exceptions import (
     ConnectionErrorWrapper,
     APIResponseErrorWrapper,
 )
-from . import logger
+from util.logger import get_logger
+
+logger = get_logger('client')
 
 
 def get_user_friendly_message(error: Exception) -> str:

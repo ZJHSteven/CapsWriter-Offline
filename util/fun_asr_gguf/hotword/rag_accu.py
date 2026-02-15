@@ -12,12 +12,12 @@
 """
 
 from typing import List, Tuple, Dict
-from . import logger
+import logging
 
 
 from .algo_calc import find_best_match
 from .algo_phoneme import get_phoneme_info, Phoneme
-
+from . import logger
 
 
 class AccuRAG:

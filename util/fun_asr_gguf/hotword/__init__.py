@@ -9,7 +9,10 @@
 - HotwordManager: 热词管理器（单例）
 """
 
-from .. import logger
+import logging
+
+# 使用主模块的 logger
+logger = logging.getLogger("fun_asr_gguf.hotword")
 
 
 from .hot_phoneme import PhonemeCorrector, CorrectionResult

@@ -43,7 +43,7 @@ def lines_match_words(text_lines: List[str], words: List) -> List[srt.Subtitle]:
     
     # 标点和清理模式：动态涵盖所有已知中英文标点
     from util.constants import Punctuation
-    punc_pattern = re.compile(rf'[{re.escape(Punctuation.ALL)}\s\d]')
+    punc_pattern = re.compile(f'[{re.escape(Punctuation.ALL)}\s\d]')
     
     # 建立 token_idx 到字符偏移的映射
     token_chars = []
@@ -126,12 +126,6 @@ def get_lines(txt_file: Path) -> List[str]:
         text_lines = f.readlines()
     return text_lines
 
-def generate_srt_file(words: list, text_lines: List[str], srt_file: Path):
-    """根据提供的 words 和 text_lines 生成 srt 文件"""
-    subtitle_list = lines_match_words(text_lines, words)
-    with open(srt_file, 'w', encoding='utf-8') as f:
-        f.write(srt.compose(subtitle_list))
-
 def one_task(media_file: Path):
     # 配置要打开的文件
     txt_file = media_file.with_suffix('.txt')
@@ -144,8 +138,11 @@ def one_task(media_file: Path):
     # 获取带有时间戳的分词列表，获取分行稿件，匹配得到 srt 
     words = get_words(json_file)
     text_lines = get_lines(txt_file)
-    
-    generate_srt_file(words, text_lines, srt_file)
+    subtitle_list = lines_match_words(text_lines, words)
+
+    # 写入 srt
+    with open(srt_file, 'w', encoding='utf-8') as f:
+        f.write(srt.compose(subtitle_list))
 
 def main(files: List[Path]):
     for file in files:

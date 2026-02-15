@@ -8,8 +8,10 @@
 import re
 from typing import List, Tuple, Literal
 from dataclasses import dataclass
-from . import logger
+import logging
 from pypinyin import pinyin, Style
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

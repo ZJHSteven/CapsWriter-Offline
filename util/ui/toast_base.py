@@ -22,7 +22,10 @@ from .toast_constants import (
     SCROLL_STEP,
     DESTROY_DELAY_MS,
 )
-from . import logger
+from .toast_logger import get_toast_logger
+
+# 配置日志（智能检测主程序配置）
+logger = get_toast_logger(__name__)
 
 # DPI 感知设置（只调用一次，避免重复调用）
 try:

@@ -18,7 +18,9 @@ from util.llm.llm_exceptions import (
     wrap_openai_error, OpenAIErrorWrapper,
     TimeoutErrorWrapper
 )
-from . import logger
+from util.logger import get_logger
+
+logger = get_logger('client')
 
 
 class LLMProcessor:

@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Optional, List
 
 from util.client.state import console
-from . import logger
+from util.logger import get_logger
 
+# 日志记录器
+logger = get_logger('client')
 
 # MD 文件头部模板
 HEADER_MD = r'''```txt

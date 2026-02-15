@@ -20,9 +20,11 @@ from typing import Optional, Tuple, Union
 
 import numpy as np
 
-from config_client import ClientConfig as Config
-from . import logger
+from config import ClientConfig as Config
+from util.logger import get_logger
 
+# 日志记录器
+logger = get_logger('client')
 
 # 音频文件句柄类型
 AudioWriter = Union[Popen, wave.Wave_write]

@@ -27,9 +27,6 @@ class FunASREngine:
         n_threads: int = None,
         similar_threshold: float = 0.6,
         max_hotwords: int = 10,
-        dml_enable: bool = True,
-        vulkan_enable: bool = True,
-        vulkan_force_fp32: bool = False,
     ):
         # 封装配置
         self.config = ASREngineConfig(
@@ -42,10 +39,7 @@ class FunASREngine:
             n_predict=n_predict,
             n_threads=n_threads,
             similar_threshold=similar_threshold,
-            max_hotwords=max_hotwords,
-            dml_enable=dml_enable,
-            vulkan_enable=vulkan_enable,
-            vulkan_force_fp32=vulkan_force_fp32
+            max_hotwords=max_hotwords
         )
 
         # 初始化组件
@@ -67,10 +61,7 @@ class FunASREngine:
         overlap: float = 2.0,
         start_second: Optional[float] = None,
         duration: Optional[float] = None,
-        srt: bool = False,
-        temperature: float = 0.4,
-        top_p: float = 1.0,
-        top_k: int = 50
+        srt: bool = False
     ) -> TranscriptionResult:
         """转录音频文件 (委托给 Orchestrator)"""
         return self.orchestrator.transcribe(
@@ -82,10 +73,7 @@ class FunASREngine:
             overlap=overlap,
             start_second=start_second,
             duration=duration,
-            srt=srt,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k
+            srt=srt
         )
 
     def create_stream(self, hotwords: Optional[str] = None) -> RecognitionStream:
@@ -98,16 +86,12 @@ class FunASREngine:
         stream: RecognitionStream,
         language: Optional[str] = None,
         context: Optional[str] = None,
-        verbose: bool = True,
-        reporter = None,
-        temperature: float = 0.3,
-        top_p: float = 1.0,
-        top_k: int = 50
+        verbose: bool = False,
+        reporter = None
     ) -> DecodeResult:
         """解码识别流 (委托给 Orchestrator 内置的 Decoder)"""
         return self.orchestrator.decoder.decode_stream(
-            stream, language, context, verbose, reporter,
-            temperature=temperature, top_p=top_p, top_k=top_k
+            stream, language, context, verbose, reporter
         )
 
     def cleanup(self):
@@ -126,9 +110,6 @@ def create_asr_engine(
     n_threads: int = None,
     similar_threshold: float = 0.6,
     max_hotwords: int = 10,
-    dml_enable: bool = True,
-    vulkan_enable: bool = True,
-    vulkan_force_fp32: bool = False,
     verbose: bool = True,
 ) -> FunASREngine:
     """创建并初始化 ASR 引擎的快捷入口"""
@@ -143,9 +124,6 @@ def create_asr_engine(
         n_threads=n_threads,
         similar_threshold=similar_threshold,
         max_hotwords=max_hotwords,
-        dml_enable=dml_enable,
-        vulkan_enable=vulkan_enable,
-        vulkan_force_fp32=vulkan_force_fp32,
     )
     if not engine.initialize(verbose=verbose):
         raise RuntimeError("Failed to initialize ASR engine")

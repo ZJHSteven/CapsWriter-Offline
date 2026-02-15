@@ -29,6 +29,7 @@ if __name__ == "__main__":
         DEFAULT_INITIAL_WIDTH,
         STREAM_CHAR_DELAY_S,
     )
+    from util.ui.toast_logger import get_toast_logger
 else:
     from .toast_manager import ToastMessageManager, ToastMessage
     from .toast_constants import (
@@ -36,9 +37,11 @@ else:
         DEFAULT_INITIAL_WIDTH,
         STREAM_CHAR_DELAY_S,
     )
+    from .toast_logger import get_toast_logger
 
 
-from . import logger
+# 配置日志（智能检测主程序配置）
+logger = get_toast_logger(__name__)
 
 
 # ============================================================

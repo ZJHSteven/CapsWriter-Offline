@@ -23,7 +23,7 @@ from .hot_rectification import RectificationRAG
 
 # 尝试导入主项目的统一组件，失败则使用本地默认值（独立运行模式）
 try:
-    from config_client import ClientConfig
+    from config import ClientConfig
     HOT_THRESH = ClientConfig.hot_thresh
     HOT_SIMILAR = ClientConfig.hot_similar
     RECTIFY_THRESH = ClientConfig.hot_rectify
@@ -32,7 +32,13 @@ except ImportError:
     HOT_SIMILAR = 0.6
     RECTIFY_THRESH = 0.5
 
-from . import logger
+try:
+    from util.logger import get_logger
+    logger = get_logger('client')
+except ImportError:
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger('hotword')
 
 try:
     from util.client.state import console

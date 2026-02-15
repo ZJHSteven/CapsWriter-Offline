@@ -9,7 +9,6 @@
 4. 粘贴文本（模拟 Ctrl+V）
 """
 
-from .. import logger
 from util.client.clipboard.clipboard import (
     safe_paste,
     safe_copy,
@@ -20,7 +19,6 @@ from util.client.clipboard.clipboard import (
 )
 
 __all__ = [
-    'logger',
     'safe_paste',
     'safe_copy',
     'copy_to_clipboard',

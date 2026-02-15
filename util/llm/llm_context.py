@@ -11,7 +11,9 @@ import time
 from typing import Dict, List
 from threading import Lock
 from util.llm.llm_constants import ContextConstants, estimate_tokens
-from . import logger
+from util.logger import get_logger
+
+logger = get_logger('client')
 
 
 class ContextManager:

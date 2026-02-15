@@ -13,11 +13,11 @@ import time
 import numpy as np
 
 from util.server.server_cosmic import console
-from config_server import ServerConfig as Config
+from config import ServerConfig as Config
 from util.server.server_classes import Task, Result
 from util.tools.chinese_itn import chinese_to_num
 from util.tools.format_tools import adjust_space
-from . import logger
+from util.logger import get_logger
 from rich import inspect
 
 # 导入拆分出去的模块
@@ -30,6 +30,7 @@ from util.server.text_merge import (
 )
 from util.server.error_handler import save_error_audio
 
+logger = get_logger('server')
 
 # 任务结果缓存（按 task_id 索引）
 _results = {}
@@ -125,12 +126,7 @@ def recognize(recognizer, punc_model, task: Task) -> Result:
         stream.accept_waveform(task.samplerate, samples)
         
         t1 = time.time()
-        # 尝试带上 context 参数（自定义 FunASREngine 支持）
-        # 如果是原生 sherpa-onnx 引擎，不支持 context，会抛出 TypeError，此时回退到普通调用
-        try:
-            recognizer.decode_stream(stream, context=task.context)
-        except TypeError:
-            recognizer.decode_stream(stream)
+        recognizer.decode_stream(stream)
 
         # 更新时间戳
         result.time_start = task.time_start
@@ -171,7 +167,7 @@ def recognize(recognizer, punc_model, task: Task) -> Result:
             logger.debug(f"中间结果: {result.text[:30]}...")
             return result
 
-        # 8. 格式优化
+        # 8. 最终处理
         result.text = format_text(result.text, punc_model)
         result.text_accu = format_text(result.text_accu, punc_model)
         
@@ -190,12 +186,11 @@ def recognize(recognizer, punc_model, task: Task) -> Result:
         result.is_final = True
         
         process_time = result.time_complete - task.time_submit
-        rtf_value = process_time / result.duration if result.duration > 0 else 0
         logger.info(
             f"识别完成: task={task.task_id[:8]}, "
             f"duration={result.duration:.2f}(s), "
             f"process_time={process_time:.3f}(s), "
-            f"RTF={rtf_value:.3f}"
+            f"RTF={process_time/result.duration:.3f}"
         )
         logger.debug(f"最终文本: {result.text[:100]}...")
 

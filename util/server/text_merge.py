@@ -9,8 +9,9 @@ import re
 from typing import List, Tuple
 
 from util.constants import TextMerge, Punctuation
-from . import logger
+from util.logger import get_logger
 
+logger = get_logger('server')
 
 
 def _fuzzy_match(s1: str, s2: str, max_errors: int) -> bool:

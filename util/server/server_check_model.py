@@ -8,12 +8,13 @@
 import sys
 from pathlib import Path
 
-from config_server import ServerConfig as Config
-from config_server import ModelPaths, ModelDownloadLinks
+from config import ServerConfig as Config
+from util.model_config import ModelPaths, ModelDownloadLinks
 from util.server.server_cosmic import console
-from util.common.lifecycle import lifecycle
-from . import logger
+from util.logger import get_logger
 
+# 日志记录器
+logger = get_logger('server')
 
 
 def check_model() -> None:
@@ -61,14 +62,15 @@ def check_model() -> None:
         console.print(f'''
     [bold red]不支持的模型类型：{Config.model_type}[/bold red]
 
-    请在 config_server.py 中将 ServerConfig.model_type 设置为：
+    请在 config.py 中将 ServerConfig.model_type 设置为：
     - 'fun_asr_nano'
     - 'sensevoice'
     - 'paraformer'
 
         ''', style='bright_red')
-        input('按回车退出')
-        lifecycle.cleanup()
+        # 只在交互式终端中等待用户输入
+        if sys.stdin.isatty():
+            input('按回车退出')
         sys.exit(1)
 
     # 检查所有必需的文件
@@ -93,12 +95,13 @@ def check_model() -> None:
         error_msg += f'    [cyan]{ModelDownloadLinks.models_page}[/cyan]\n\n'
 
         error_msg += f'    下载后请根据发布页说明，解压到：[cyan]{ModelPaths.model_dir}[/cyan]\n'
-        error_msg += '    \n'
-        
+        error_msg += '    \n    按回车退出\n    '
+
         logger.error(f"模型文件检查失败，共 {len(missing_files)} 个文件缺失")
         console.print(error_msg)
-        input('按回车退出')
-        lifecycle.cleanup()
+        # 只在交互式终端中等待用户输入
+        if sys.stdin.isatty():
+            input()
         sys.exit(1)
 
     # 所有检查通过

@@ -17,12 +17,14 @@ import numpy as np
 import sounddevice as sd
 
 from util.client.state import console, get_state
-from . import logger
+from util.logger import get_logger
 from util.common.lifecycle import lifecycle
 
 if TYPE_CHECKING:
     from util.client.state import ClientState
 
+# 日志记录器
+logger = get_logger('client')
 
 
 class AudioStreamManager:

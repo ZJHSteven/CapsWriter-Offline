@@ -17,15 +17,16 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 import websockets
 
-from config_client import ClientConfig as Config
+from config import ClientConfig as Config
 from util.client.state import console
 from util.client.audio.file_manager import AudioFileManager
-from . import logger
+from util.logger import get_logger
 
 if TYPE_CHECKING:
     from util.client.state import ClientState
 
 # 日志记录器
+logger = get_logger('client')
 
 
 class AudioRecorder:
@@ -154,35 +155,10 @@ class AudioRecorder:
                         'data': base64.b64encode(
                             np.mean(data[::3], axis=1).tobytes()
                         ).decode('utf-8'),
-                        'context': Config.context,
                     }
                     asyncio.create_task(self._send_message(message))
                     
                 elif task['type'] == 'finish':
-                    # 如果有缓存的数据未发送，先发送缓存
-                    if self._cache:
-                        data = np.concatenate(self._cache)
-                        self._cache.clear()
-                        
-                        self._duration += len(data) / 48000
-                        if Config.save_audio and self._file_manager:
-                            self._file_manager.write(data)
-
-                        message = {
-                            'task_id': self.task_id,
-                            'seg_duration': Config.mic_seg_duration,
-                            'seg_overlap': Config.mic_seg_overlap,
-                            'is_final': False,
-                            'time_start': self._start_time,
-                            'time_frame': task['time'],
-                            'source': 'mic',
-                            'data': base64.b64encode(
-                                np.mean(data[::3], axis=1).tobytes()
-                            ).decode('utf-8'),
-                            'context': Config.context,
-                        }
-                        asyncio.create_task(self._send_message(message))
-
                     # 完成写入本地文件
                     if Config.save_audio and self._file_manager:
                         self._file_manager.finish()
@@ -202,7 +178,6 @@ class AudioRecorder:
                         'time_frame': task['time'],
                         'source': 'mic',
                         'data': '',
-                        'context': Config.context,
                     }
                     asyncio.create_task(self._send_message(message))
                     break

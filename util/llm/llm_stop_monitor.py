@@ -8,8 +8,10 @@ LLM 输出中断监控
 import logging
 import threading
 from typing import Optional
-from config_client import ClientConfig as Config
-from . import logger
+from config import ClientConfig as Config
+from util.logger import get_logger
+
+logger = get_logger('client')
 
 
 # 全局事件：用于通知 LLM 停止输出（用于手动按 ESC 键的情况）

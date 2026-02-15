@@ -4,8 +4,10 @@ FunASR-GGUF 结果合并模块
 处理长音频识别时多个片段结果的拼接和去重。
 """
 
+import logging
 from typing import List, Dict, Any, Tuple
-from . import logger
+
+logger = logging.getLogger(__name__)
 
 import difflib
 

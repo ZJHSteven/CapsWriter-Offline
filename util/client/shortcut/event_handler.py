@@ -6,8 +6,9 @@
 """
 
 import time
-from . import logger
+from util.logger import get_logger
 
+logger = get_logger('client')
 
 
 class ShortcutEventHandler:

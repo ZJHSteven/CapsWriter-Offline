@@ -15,8 +15,9 @@ from .dialogs import (
     wait_window,
 )
 from .toast_constants import DEFAULT_FONT_FAMILY
-from . import logger
+from util.logger import get_logger
 
+logger = get_logger('client')
 
 
 class HotwordDialog:

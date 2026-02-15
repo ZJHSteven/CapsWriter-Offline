@@ -68,9 +68,9 @@ def _daemon_thread_builder(target, args=(), kwargs=None):
 
 import queue
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Executor, Future
 
-class SimpleDaemonExecutor(ThreadPoolExecutor):
+class SimpleDaemonExecutor(Executor):
     """
     一个极其简单的 Executor，为每个任务创建一个守护线程。
     注意：这没有池化（Pooling），每个任务一个线程。

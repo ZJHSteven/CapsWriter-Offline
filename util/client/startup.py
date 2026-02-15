@@ -3,8 +3,8 @@ import os
 from pathlib import Path
 from platform import system
 from util.client.state import get_state
-from . import logger
-from config_client import ClientConfig as Config
+from util.logger import get_logger
+from config import ClientConfig as Config
 from util.client.cleanup import request_exit_from_tray
 from util.client.ui import TipsDisplay
 from util.hotword import get_hotword_manager
@@ -14,6 +14,7 @@ from util.client.shortcut.shortcut_config import Shortcut
 from util.client.shortcut.shortcut_manager import ShortcutManager
 from util.tools.empty_working_set import empty_current_working_set
 
+logger = get_logger('client')
 
 
 def _setup_tray(state, base_dir):
@@ -21,7 +22,7 @@ def _setup_tray(state, base_dir):
     初始化托盘图标（延迟导入，支持无 GUI 环境）
     """
     try:
-        from util.client.ui import enable_min_to_tray
+        from util.ui.tray import enable_min_to_tray
     except ImportError as e:
         logger.warning(f"托盘模块导入失败，跳过托盘功能: {e}")
         return
@@ -34,29 +35,22 @@ def _setup_tray(state, base_dir):
     def clear_memory():
         from util.llm.llm_handler import clear_llm_history
         clear_llm_history()
-        from util.client.ui import toast
+        from util.ui.toast import toast
         toast("清除成功：已清除所有角色的对话历史记录", duration=3000, bg="#075077")
 
     def add_hotword():
         try:
-            from util.client.ui import on_add_hotword
+            from util.ui.hotword_menu_handler import on_add_hotword
             on_add_hotword()
         except ImportError as e:
             logger.warning(f"无法导入热词菜单处理器: {e}")
 
     def add_rectify():
         try:
-            from util.client.ui import on_add_rectify_record
+            from util.ui.rectify_menu_handler import on_add_rectify_record
             on_add_rectify_record()
         except ImportError as e:
             logger.warning(f"无法导入纠错菜单处理器: {e}")
-
-    def add_context():
-        try:
-            from util.client.ui import on_edit_context
-            on_edit_context()
-        except ImportError as e:
-            logger.warning(f"无法导入上下文菜单处理器: {e}")
 
     def copy_last_result():
         text = state.last_output_text
@@ -69,10 +63,10 @@ def _setup_tray(state, base_dir):
     enable_min_to_tray(
         'CapsWriter Client',
         icon_path,
+        logger=logger,
         exit_callback=request_exit_from_tray,
         more_options=[
             ('📋 复制结果', copy_last_result),
-            ('📝 上下文', add_context),
             ('✨ 添加热词', add_hotword),
             ('🛠️ 添加纠错', add_rectify),
             ('🧹 清除记忆', clear_memory),

@@ -19,7 +19,9 @@ from typing import List, Dict, Optional, Tuple, Any
 
 from util.llm.llm_role_config import RoleConfig
 from util.llm.llm_constants import estimate_tokens
-from . import logger
+from util.logger import get_logger
+
+logger = get_logger('client')
 
 
 class MessageBuilder:
@@ -86,9 +88,7 @@ class MessageBuilder:
             if hotwords:
                 logger.debug(f"[DEBUG] hotwords[0] type={type(hotwords[0])}, value={hotwords[0]}")
             try:
-                # hotwords 结构为 [(source, match, score), ...]
-                words = [item[1] for item in hotwords]
-                        
+                words = [hw for hw, _ in hotwords]
                 if words:
                     context_parts.append(f"{role_config.prompt_prefix_hotwords}[{', '.join(words)}]")
                     logger.debug(f"[消息构建] 已添加热词列表")

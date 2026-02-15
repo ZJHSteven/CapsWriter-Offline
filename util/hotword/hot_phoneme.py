@@ -17,8 +17,24 @@ from .algo_phoneme import get_phoneme_info, Phoneme
 from .rag_fast import FastRAG
 from .algo_calc import fast_substring_score, fuzzy_substring_score, fuzzy_substring_search_constrained
 
-# 使用统一的 logger（从 __init__.py 导入）
-from . import logger
+# 配置日志
+try:
+    from util.logger import get_logger
+    logger = get_logger('client')
+except (ImportError, Exception):
+    # 如果作为独立模块运行，或获取统一日志失败，则使用本地配置
+    LOG_DIR = Path("logs")
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = LOG_DIR / "hotword_corrector.log"
+
+    logger = logging.getLogger("HotwordCorrector")
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        fh = logging.FileHandler(log_path, encoding='utf-8', mode='a')
+        fh.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
 
 
 class MatchResult(NamedTuple):
@@ -243,7 +259,6 @@ Python
 Microsoft
 iPhone
 7-Zip
-Fun-ASR
 
 # 杂项
 Claude
@@ -269,7 +284,6 @@ VsCode
         "喜欢刷Bili Bili",
         "请把那个锯子发给我一下",
         "现在有了 Cloud，已经可以了。",
-        "传给服务端，对于 FUNAS2 模型就有效利用这一个 context。"
     ]
     for text in test_cases_zh:
         result = corrector.correct(text)
