@@ -10,6 +10,7 @@
   - `config.py` 已加入百炼配置项，并将默认模型切换为 `aliyun_realtime`。
   - `readme.md` 已补充云端模式 `DASHSCOPE_API_KEY` 配置说明。
   - 新增资料策略文档 `docs/bailian_context7_strategy.md`。
+  - 修复服务端启动导入错误：`aliyun_realtime` 模式下改为按需导入 `create_asr_engine`，避免触发 `util.fun_asr_gguf` 循环导入。
 - 正在做：联调云端模式下的识别流程，并验证对现有输出链路的兼容性。
 - 下一步：
   - 跑通语法检查与最小链路自测。
@@ -31,3 +32,5 @@
   - 复现：直接把本地路径或 base64 放到 `input`，接口会失败。
 - 坑2：文件转写与实时听写共用同一阻塞执行路径会互相影响。
   - 复现：启动长视频转写后，按热键录音会出现响应变慢或等待。
+- 坑3：云端模式下若在模块顶层导入本地 GGUF 引擎，可能触发循环导入并导致服务端启动失败。
+  - 复现：`model_type=aliyun_realtime`，但 `server_init_recognizer.py` 顶层仍导入 `util.fun_asr_gguf`。

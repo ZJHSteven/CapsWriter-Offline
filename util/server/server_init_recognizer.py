@@ -12,7 +12,6 @@ from util.server.server_recognize import recognize
 from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer
 from util.tools.empty_working_set import empty_current_working_set
 from util.logger import get_logger
-from util.fun_asr_gguf import create_asr_engine
 
 # 获取日志记录器
 logger = get_logger('server')
@@ -102,6 +101,8 @@ def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue,
             )
         elif model_type == 'fun_asr_nano':
             logger.debug("使用 Fun-ASR-Nano 模型")
+            # 延迟导入本地 GGUF 引擎，避免在云端模式下触发不必要的模块加载与循环导入
+            from util.fun_asr_gguf import create_asr_engine
             # recognizer = sherpa_onnx.OfflineRecognizer.from_funasr_nano(
             #     **{key: value for key, value in FunASRNanoArgs.__dict__.items() if not key.startswith('_')}
             # )
