@@ -98,8 +98,43 @@ class ClientConfig:
     mic_seg_duration = 60       # 麦克风听写时分段长度：60秒
     mic_seg_overlap = 4         # 麦克风听写时分段重叠：4秒
 
-    file_seg_duration = 12      # 转录文件时分段长度（调小以减少占用识别主链路的连续时长）
-    file_seg_overlap = 4        # 转录文件时分段重叠
+    # 文件转写后端：
+    # - 'aliyun_rest': 走阿里云百炼录音文件 REST 异步任务（与实时链路解耦）
+    file_transcribe_backend = 'aliyun_rest'
+
+    # 录音文件 REST 转写配置（file_transcribe_backend='aliyun_rest' 时生效）
+    file_rest_api_key = os.getenv('DASHSCOPE_API_KEY', '')  # 建议通过环境变量注入
+    file_rest_submit_url = 'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription'
+    file_rest_task_url_template = 'https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}'
+    file_rest_model = 'fun-asr'
+    file_rest_poll_interval = 1.0      # 轮询间隔（秒）
+    file_rest_poll_timeout = 7200.0    # 轮询超时（秒）
+    file_rest_channel_id = [0]         # 音轨索引提示
+    file_rest_vocabulary_id = ''       # 可选热词词表 ID
+
+    # 本地文件上传到可访问 URL 的方式（录音文件 REST 只接受 URL，不接受本地路径/base64）
+    # - 'presigned_put': 先调用临时签名接口拿 upload_url，再 PUT 上传
+    # - 'custom_api':    调用你自己的上传 API（multipart/form-data）
+    # - 'none':          不自动上传（会直接报错提示你先配置）
+    file_upload_mode = 'none'
+
+    # presigned_put 模式配置（建议用于 OSS 临时签名上传）
+    file_upload_presign_api = ''       # 例如: https://your-service/api/presign
+    file_upload_presign_timeout = 30.0
+    file_upload_put_timeout = 600.0
+
+    # custom_api 模式配置（你的上传 API 负责存储并返回公网 URL）
+    file_upload_api = ''               # 例如: https://your-service/api/upload
+    file_upload_timeout = 600.0
+    file_upload_result_key = 'url'     # 上传接口返回 JSON 中的 URL 字段名
+
+    # 是否先用 ffmpeg 把视频/音频统一转成 16k 单声道 wav 再上传。
+    # 建议保留为 True，兼容“拖视频转写”的场景。
+    file_prepare_audio_with_ffmpeg = True
+
+    # 兼容旧链路的分段参数（保留字段，后续如无需可移除）
+    file_seg_duration = 12
+    file_seg_overlap = 4
 
     file_save_srt = True        # 转录文件时是否保存 srt 字幕
     file_save_txt = True        # 转录文件时是否保存 txt 文本（按标点切分后的）

@@ -11,12 +11,15 @@
   - `readme.md` 已补充云端模式 `DASHSCOPE_API_KEY` 配置说明。
   - 新增资料策略文档 `docs/bailian_context7_strategy.md`。
   - 修复服务端启动导入错误：`aliyun_realtime` 模式下改为按需导入 `create_asr_engine`，避免触发 `util.fun_asr_gguf` 循环导入。
+  - 新增独立文件转写 REST 客户端：`util/client/transcribe/dashscope_rest_client.py`。
+  - 新增本地文件上传 URL 解析器：`util/client/transcribe/file_upload_resolver.py`（支持 `presigned_put` 与 `custom_api`）。
+  - `util/client/transcribe/file_transcriber.py` 已重构为独立 REST 通道，不再依赖本地实时服务端 WebSocket。
+  - `config.py` 已新增文件 REST 与上传通道配置项。
 - 正在做：将文件转写从本地 WebSocket 识别链路迁移到百炼 REST 异步链路（独立通道）。
 - 下一步：
   - 跑通语法检查与最小链路自测。
-  - 完成本地文件上传到可访问 URL（临时签名上传 / 自定义上传接口）能力。
-  - 完成文件 REST 异步任务提交与轮询结果落盘。
-  - 补充 readme 使用说明与环境变量示例。
+  - 联调 presigned_put / custom_api 两种上传模式。
+  - 补充 readme 示例配置与使用步骤。
 
 ## 关键决策与理由（防止“吃书”）
 - 决策A：实时听写主链路采用 WebSocket，而不是仅 REST。
@@ -29,6 +32,8 @@
   - 原因：在不大改客户端流程的前提下，先降低文件任务对实时听写的阻塞影响。
 - 决策E：最终文件转写必须独立于实时识别服务端，直接走 REST 异步。
   - 原因：彻底解耦后端资源占用，避免文件任务影响日常麦克风实时听写。
+- 决策F：上传层采用“临时签名上传 + 自定义上传 API”双模式。
+  - 原因：避免硬编码单一 OSS SDK，兼容不同对象存储与企业内网网关方案。
 
 ## 常见坑 / 复现方法
 - 坑1：REST 文件识别不支持本地文件直传与 base64。

@@ -37,7 +37,7 @@ v2.1 新增：
 ## ✨ 核心特性
 
 -   **语音输入**：按住 `CapsLock` 键说话，松开即输入，默认去除末尾逗句号。支持对讲机模式和单击录音模式。
--   **文件转录**：音视频文件往客户端一丢，字幕 (`.srt`)、文本 (`.txt`)、时间戳 (`.json`) 统统都有。
+-   **文件转录**：音视频文件往客户端一丢，走独立的云端 REST 异步转写通道，字幕 (`.srt`)、文本 (`.txt`)、时间戳 (`.json`) 统统都有。
 -   **数字 ITN**：自动将「十五六个」转为「15~16个」，支持各种复杂数字格式。
 -   **热词替换**：在 `hot.txt` 记下你的专业术语，支持拼音模糊匹配。
 -   **正则替换**：在 `hot-rule.txt` 用正则或简单等号规则，精准强制替换。
@@ -89,6 +89,10 @@ LLM 角色既可以使用 Ollama 运行的本地模型，又可以用 API 访问
 -   修改 `shortcut` 可以更换快捷键（如 `right shift`）。
 -   修改 `hold_mode = False` 可以切换为“点一下录音，再点一下停止”。
 -   修改 `llm_enabled` 来开启或关闭 AI 助手功能。
+-   文件转写通道建议重点关注：
+    - `file_transcribe_backend`
+    - `file_upload_mode` / `file_upload_presign_api` / `file_upload_api`
+    - `file_rest_model` / `file_rest_poll_interval`
 
 
 ## 🛠️ 常见问题

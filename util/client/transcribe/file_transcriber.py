@@ -1,286 +1,268 @@
 # coding: utf-8
 """
-文件转录模块
+文件转录模块（独立 REST 通道版本）。
 
-提供 FileTranscriber 类用于将音视频文件转录为字幕。
+核心目标：
+1. 文件转写完全脱离本地实时识别服务端，不再占用实时链路资源。
+2. 采用百炼录音文件 REST 异步接口：提交任务 -> 轮询状态 -> 获取结果。
+3. 保持原有落盘体验（txt/json/srt/merge），尽量减少用户使用差异。
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import re
-import subprocess
+import tempfile
 import time
 import uuid
-import websockets
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from config import ClientConfig as Config
 from util.client.state import console
-from util.client.websocket_manager import WebSocketManager
+from util.client.transcribe.dashscope_rest_client import DashScopeAsrRestClient
+from util.client.transcribe.file_upload_resolver import FileUploadResolver
 from util.tools import srt_from_txt
 from util.logger import get_logger
 
 if TYPE_CHECKING:
     from util.client.state import ClientState
 
-# 日志记录器
 logger = get_logger('client')
 
 
 class FileTranscriber:
     """
-    文件转录器
-    
-    负责将音视频文件转录为字幕：
-    - 使用 FFmpeg 提取音频
-    - 将音频数据发送到服务端
-    - 接收识别结果
-    - 生成 SRT 字幕文件
+    文件转录器（独立通道）。
+
+    处理流程：
+    1. （可选）把本地视频/音频预处理成 16k 单声道 wav
+    2. 上传文件到可访问 URL（临时签名上传或自定义上传 API）
+    3. 提交百炼 REST 异步任务
+    4. 轮询任务完成并解析结果
+    5. 保存 txt/json/srt/merge 文件
     """
-    
+
     def __init__(self, state: 'ClientState', file: Path):
-        """
-        初始化文件转录器
-        
-        Args:
-            state: 客户端状态实例
-            file: 要转录的文件路径
-        """
         self.state = state
         self.file = file
-        self._ws_manager = WebSocketManager(state)
         self.task_id: Optional[str] = None
-        self._audio_duration: float = 0.0
-    
+        self._prepared_file: Optional[Path] = None
+        self._need_cleanup_prepared_file = False
+        self._rest_client: Optional[DashScopeAsrRestClient] = None
+        self._submit_time: float = 0.0
+
     async def check(self) -> bool:
         """
-        检查转录条件
-        
-        Returns:
-            是否满足转录条件
+        检查转写前置条件。
         """
-        # 1. 检查 FFmpeg 和 ffprobe 环境
-        import shutil
-        ffmpeg_path = shutil.which('ffmpeg')
-        ffprobe_path = shutil.which('ffprobe')
-        
-        if ffmpeg_path is None:
-            console.print('\n[bold red]错误：未检测到 FFmpeg 环境[/bold red]')
-            console.print('    文件转录功能依赖 FFmpeg 来提取音视频中的音频。')
-            console.print('    [cyan]建议处理方案：[/cyan]')
-            console.print('    1. 请确保已安装 FFmpeg 并将其 [bold]bin[/bold] 目录添加到系统环境变量 [bold]Path[/bold] 中。')
-            console.print('    2. 或者将 [bold]ffmpeg.exe[/bold] 放置在程序根目录下。')
-            console.print('    3. 也可以前往官方下载：[u]https://ffmpeg.org/download.html[/u]\n')
-            logger.error("未检测到 FFmpeg 环境，无法进行文件转录")
-            return False
-            
-        if ffprobe_path is None:
-            console.print('\n[bold yellow]提示：未检测到 ffprobe 环境[/bold yellow]')
-            console.print('    程序将无法预先获取文件时长，进度条将只显示当前已发送时长。')
-            console.print('    [cyan]建议：[/cyan]若需完整进度条，请在安装 FFmpeg 时确保 bin 目录下包含 ffprobe.exe。\n')
-            logger.warning("未检测到 ffprobe 环境，进度显示将受到限制")
-
-        # 2. 检查服务端连接
-        if not await self._ws_manager.connect():
-            console.print('无法连接到服务端')
-            logger.error("无法连接到服务端")
-            return False
-        
-        # 3. 检查文件是否存在
         if not self.file.exists():
             console.print(f'文件不存在：{self.file}')
             logger.error(f"文件不存在: {self.file}")
             return False
-        
+
+        if Config.file_transcribe_backend != 'aliyun_rest':
+            console.print(f"当前 file_transcribe_backend={Config.file_transcribe_backend}，暂不支持。")
+            logger.error(f"不支持的文件转写后端: {Config.file_transcribe_backend}")
+            return False
+
+        if not Config.file_rest_api_key:
+            console.print('\n[bold red]错误：未配置 DASHSCOPE_API_KEY[/bold red]')
+            console.print('    请配置环境变量 DASHSCOPE_API_KEY，或在 config.py 里设置 file_rest_api_key。')
+            logger.error("未配置 file_rest_api_key")
+            return False
+
+        if Config.file_prepare_audio_with_ffmpeg:
+            import shutil
+            ffmpeg_path = shutil.which('ffmpeg')
+            if ffmpeg_path is None:
+                console.print('\n[bold red]错误：未检测到 FFmpeg 环境[/bold red]')
+                console.print('    该模式下会先把文件转成 wav 再上传，请安装 FFmpeg。')
+                logger.error("未检测到 FFmpeg，无法执行文件预处理")
+                return False
+
+        # 提前检查上传模式配置，避免运行到中途才报错。
+        upload_mode = (Config.file_upload_mode or 'none').lower()
+        if upload_mode == 'presigned_put' and not Config.file_upload_presign_api:
+            console.print('\n[bold red]错误：file_upload_mode=presigned_put 但未配置 file_upload_presign_api[/bold red]')
+            logger.error("缺少 file_upload_presign_api")
+            return False
+        if upload_mode == 'custom_api' and not Config.file_upload_api:
+            console.print('\n[bold red]错误：file_upload_mode=custom_api 但未配置 file_upload_api[/bold red]')
+            logger.error("缺少 file_upload_api")
+            return False
+        if upload_mode == 'none':
+            console.print('\n[bold red]错误：file_upload_mode=none，未配置本地文件上传通道[/bold red]')
+            console.print('    请在 config.py 中设置 presigned_put 或 custom_api。')
+            logger.error("file_upload_mode=none")
+            return False
+
         return True
-    
-    async def _get_audio_duration(self) -> float:
-        """使用 ffprobe 获取音视频文件的确切时长"""
-        cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", str(self.file)
+
+    async def _prepare_audio_file(self) -> Path:
+        """
+        准备待上传文件：
+        - 默认使用 ffmpeg 转成 16k 单声道 wav，兼容视频输入与音频格式差异。
+        - 若关闭该选项，则直接上传原文件。
+        """
+        if not Config.file_prepare_audio_with_ffmpeg:
+            return self.file
+
+        temp_file = Path(tempfile.mktemp(prefix='cw_rest_', suffix='.wav'))
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(self.file),
+            "-vn",              # 忽略视频流，只保留音频
+            "-ac", "1",         # 单声道
+            "-ar", "16000",     # 16k 采样率
+            str(temp_file),
         ]
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            if process.returncode == 0:
-                return float(stdout.decode().strip())
-        except Exception as e:
-            logger.warning(f"无法通过 ffprobe 获取时长: {e}")
-        return 0.0
+
+        logger.info(f"开始预处理音频: {self.file} -> {temp_file}")
+        process = await asyncio.create_subprocess_exec(
+            *ffmpeg_cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await process.wait()
+        if process.returncode != 0:
+            raise RuntimeError(f"ffmpeg 预处理失败，退出码={process.returncode}")
+
+        self._prepared_file = temp_file
+        self._need_cleanup_prepared_file = True
+        return temp_file
+
+    def _build_upload_resolver(self) -> FileUploadResolver:
+        return FileUploadResolver(
+            mode=Config.file_upload_mode,
+            presign_api=Config.file_upload_presign_api,
+            presign_timeout=Config.file_upload_presign_timeout,
+            put_timeout=Config.file_upload_put_timeout,
+            upload_api=Config.file_upload_api,
+            upload_timeout=Config.file_upload_timeout,
+            upload_result_key=Config.file_upload_result_key,
+        )
+
+    def _build_rest_client(self) -> DashScopeAsrRestClient:
+        return DashScopeAsrRestClient(
+            api_key=Config.file_rest_api_key,
+            submit_url=Config.file_rest_submit_url,
+            task_url_template=Config.file_rest_task_url_template,
+            model=Config.file_rest_model,
+            poll_interval=Config.file_rest_poll_interval,
+            poll_timeout=Config.file_rest_poll_timeout,
+            channel_id=Config.file_rest_channel_id,
+            vocabulary_id=Config.file_rest_vocabulary_id,
+        )
 
     async def send(self) -> None:
-        """发送音频数据到服务端 (异步流式处理)"""
-        websocket = self.state.websocket
-        
+        """
+        发送阶段（独立通道版本）：
+        - 准备本地文件
+        - 上传得到 URL
+        - 提交 REST 异步任务
+        """
         self.task_id = str(uuid.uuid1())
         console.print(f'\n任务标识：{self.task_id}')
         console.print(f'    处理文件：{self.file}')
-        
-        # 1. 预先获取时长以便显示进度
-        self._audio_duration = await self._get_audio_duration()
-        if self._audio_duration > 0:
-            console.print(f'    音频长度：{self._audio_duration:.2f}s')
-        
-        logger.info(f"开始转录文件: {self.file}, 任务ID: {self.task_id}")
-        
-        # 2. 异步流式提取并发送
-        ffmpeg_cmd = [
-            "ffmpeg", "-i", str(self.file),
-            "-f", "f32le", "-ac", "1", "-ar", "16000", "-"
-        ]
-        
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *ffmpeg_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-            
-            # 分块大小：1分钟音频 (16000 * 4 * 60 bytes)
-            chunk_size = 16000 * 4 * 60
-            bytes_sent = 0
-            
-            while True:
-                # 异步读取一块数据
-                data = await process.stdout.read(chunk_size)
-                if not data:
-                    break
-                
-                # 探测下一块是否还有数据，以确定是否为结束片段
-                # 注意：这里我们通过读取到的长度是否小于 chunk_size 
-                # 或者尝试再读 1 字节来辅助判断（更稳妥的是直接发，直到读空）
-                # 这里简单处理：只要本次读到了数据就发出去，真正的 is_final 由循环结束后的空包确定
-                
-                bytes_sent += len(data)
-                progress = bytes_sent / 4 / 16000
-                if self._audio_duration > 0:
-                    prog_str = f'    发送进度：{progress:.2f}s / {self._audio_duration:.2f}s'
-                else:
-                    prog_str = f'    发送进度：{progress:.2f}s'
-                console.print(prog_str, end='\r')
 
-                message = {
-                    'task_id': self.task_id,
-                    'seg_duration': Config.file_seg_duration,
-                    'seg_overlap': Config.file_seg_overlap,
-                    'is_final': False,
-                    'time_start': time.time(),
-                    'time_frame': time.time(),
-                    'source': 'file',
-                    'data': base64.b64encode(data).decode('utf-8'),
-                }
-                await websocket.send(json.dumps(message))
+        prepared_file = await self._prepare_audio_file()
+        if prepared_file != self.file:
+            console.print(f'    预处理文件：{prepared_file.name}')
 
-            # 发送结束标志
-            final_message = {
-                'task_id': self.task_id,
-                'seg_duration': Config.file_seg_duration,
-                'seg_overlap': Config.file_seg_overlap,
-                'is_final': True,
-                'time_start': time.time(),
-                'time_frame': time.time(),
-                'source': 'file',
-                'data': '',
-            }
-            await websocket.send(json.dumps(final_message))
-            await process.wait()
-            
-            if self._audio_duration == 0:
-                self._audio_duration = progress # 回填时长供 receive 使用
-                console.print(f'    音频长度：{self._audio_duration:.2f}s')
+        resolver = self._build_upload_resolver()
+        file_url = await resolver.resolve(prepared_file)
+        console.print('    上传完成，已获取可访问 URL')
+        logger.info(f"文件上传完成: {prepared_file} -> {file_url}")
 
-            logger.debug("音频数据发送完成")
-            
-        except websockets.exceptions.ConnectionClosed:
-            console.print('\n[bold red]错误：与服务端的连接已断开，请检查服务端是否正常运行。[/bold red]')
-            logger.error(f"发送数据时连接断开: {self.file}")
-            # 尝试杀掉 FFmpeg 进程
-            if 'process' in locals() and process.returncode is None:
-                process.terminate()
-            raise
-        except Exception as e:
-            console.print(f'\n[red]转录过程中发生错误: {e}')
-            logger.error(f"转录发送异常: {e}", exc_info=True)
-            if 'process' in locals() and process.returncode is None:
-                process.terminate()
-            return
-    
+        self._rest_client = self._build_rest_client()
+        self._submit_time = time.time()
+        self.task_id = await self._rest_client.submit_task(file_url)
+        console.print(f'    云端任务ID：{self.task_id}')
+        logger.info(f"文件转写任务已提交: task_id={self.task_id}")
+
     async def receive(self) -> None:
-        """接收转录结果"""
-        websocket = self.state.websocket
-        
-        try:
-            async for message in websocket:
-                message = json.loads(message)
-                console.print(f'    转录进度: {message["duration"]:.2f}s', end='\r')
-                if message['is_final']:
-                    break
-        except websockets.exceptions.ConnectionClosed:
-            console.print('\n[bold red]错误：在等待识别结果时，与服务端的连接已断开。[/bold red]')
-            logger.error(f"接收结果时连接断开: {self.file}")
-            return
-        except Exception as e:
-            logger.error(f"接收消息错误: {e}")
-            return
+        """
+        接收阶段（独立通道版本）：
+        - 轮询任务直到完成
+        - 解析并落盘
+        """
+        if not self.task_id or not self._rest_client:
+            raise RuntimeError("请先调用 send() 提交任务，再调用 receive()")
 
-        # 解析结果
-        # text: 简单拼接（用于显示）
-        # text_accu: 精确拼接（用于字幕生成，带时间戳）
-        text_display = message['text']
-        text_accu = message.get('text_accu', message['text'])
+        try:
+            response = await self._rest_client.wait_for_result(self.task_id)
+            result = self._rest_client.parse_result(response)
+            self._save_outputs(
+                text_display=result.text_display,
+                text_accu=result.text_accu,
+                tokens=result.tokens,
+                timestamps=result.timestamps,
+            )
+
+            process_duration = time.time() - self._submit_time
+            console.print(f'    处理耗时：{process_duration:.2f}s')
+            console.print(f'    识别结果：\n[green]{result.text_display}')
+            logger.info(
+                f"文件转写完成: {self.file}, task_id={self.task_id}, "
+                f"耗时={process_duration:.2f}s, 文本长度={len(result.text_display)}"
+            )
+        finally:
+            await self._cleanup_temp_files()
+
+    def _save_outputs(
+        self,
+        text_display: str,
+        text_accu: str,
+        tokens: list[str],
+        timestamps: list[float],
+    ) -> None:
+        """
+        保存转写结果文件，兼容原有产物格式。
+        """
         text_split = re.sub('[，。？]', '\n', text_accu)
-        timestamps = message['timestamps']
-        tokens = message['tokens']
-        
-        # 按照配置保存结果文件
         json_filename = self.file.with_suffix('.json')
         txt_filename = self.file.with_suffix('.txt')
         merge_filename = self.file.with_suffix('.merge.txt')
-        
-        # 1. 保存 merge.txt (如果启用)
+
         if Config.file_save_merge:
             with open(merge_filename, 'w', encoding='utf-8') as f:
                 f.write(text_accu)
             logger.debug(f"保存合并文本: {merge_filename}")
 
-        # 2. 保存 txt 或为了生成 srt 而暂时保存 txt
         if Config.file_save_txt or Config.file_save_srt:
             with open(txt_filename, 'w', encoding='utf-8') as f:
                 f.write(text_split)
             logger.debug(f"保存切分文本: {txt_filename}")
 
-        # 3. 保存 json (如果启用)
         if Config.file_save_json:
             with open(json_filename, 'w', encoding='utf-8') as f:
                 json.dump({'timestamps': timestamps, 'tokens': tokens}, f, ensure_ascii=False)
             logger.debug(f"保存 JSON 结果: {json_filename}")
-        
-        # 4. 生成 srt (如果启用)
+
         if Config.file_save_srt:
             srt_from_txt.one_task(txt_filename)
-        
-        # 5. 清理中间生成的 txt (如果用户不想要)
+
         if not Config.file_save_txt and txt_filename.exists():
             try:
                 txt_filename.unlink()
                 logger.debug(f"清理中间 TXT 文件: {txt_filename}")
             except Exception as e:
                 logger.warning(f"清理中间 TXT 文件失败: {e}")
-        
-        process_duration = message['time_complete'] - message['time_start']
-        console.print(f'\033[K    处理耗时：{process_duration:.2f}s')
-        console.print(f'    识别结果：\n[green]{text_display}')
-        
-        logger.info(
-            f"转录完成: {self.file}, 处理耗时: {process_duration:.2f}s, "
-            f"文本长度: {len(text_display)}"
-        )
+
+    async def _cleanup_temp_files(self) -> None:
+        """
+        清理预处理产生的临时文件。
+        """
+        if not self._need_cleanup_prepared_file or not self._prepared_file:
+            return
+        try:
+            if self._prepared_file.exists():
+                self._prepared_file.unlink()
+                logger.debug(f"已清理临时文件: {self._prepared_file}")
+        except Exception as e:
+            logger.warning(f"清理临时文件失败: {e}")
+        finally:
+            self._prepared_file = None
+            self._need_cleanup_prepared_file = False
