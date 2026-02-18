@@ -1,5 +1,34 @@
 # ExecPlan（阿里百炼云端改造）
 
+## ExecPlan（2026-02-18：百炼 FunASR Skill 沉淀）
+
+### 目标
+- 基于当前项目实装代码与阿里云官方文档，沉淀一个可复用 Skill。
+- 覆盖三条核心链路：实时 WebSocket、录音文件 REST 异步、`oss://` 临时 URL 上传。
+- 形成“可直接复用到新项目”的最小交互模板与排错清单。
+
+### 产物
+1. `skills/aliyun-bailian-funasr/SKILL.md`
+- 定义 Skill 触发语义与执行工作流。
+- 规定信息收集、接口调用、状态机拼接、收尾与验收步骤。
+
+2. `skills/aliyun-bailian-funasr/references/api-spec.md`
+- 汇总官方接口的请求/响应格式与字段语义。
+- 给出实时 WS 事件流、REST 任务状态流、上传中转流程的结构化示例。
+- 标注与本项目现有实现对应的代码位置，方便迁移。
+
+### 执行步骤
+1. 检索并整理项目内阿里云调用代码与配置。
+2. 对照官方文档补齐协议细节与边界约束。
+3. 生成 Skill 目录并编写 `SKILL.md` 与 `references/api-spec.md`。
+4. 运行 `quick_validate.py` 做格式校验。
+5. 更新 `PROGRESS.md`，记录结论、决策与下一步。
+
+### 验证
+- Skill frontmatter 合法（`name`、`description` 完整）。
+- 参考文档包含三条链路完整字段：WS、REST、上传。
+- 明确“去重拼接策略”与“等待 `task-finished` 收尾”的最终文本组装规则。
+
 ## ExecPlan（2026-02-18：实时链路状态机重构）
 
 ### 目标
