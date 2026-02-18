@@ -24,6 +24,7 @@
   - `util/server/server_init_recognizer.py` 已为 aliyun 模式接入新会话接口，仅在 final 时回传结果，避免中间快照干扰输出。
   - 已新增百炼 Fun-ASR 可复用 Skill：`skills/aliyun-bailian-funasr/SKILL.md`。
   - 已新增 Skill 协议规范：`skills/aliyun-bailian-funasr/references/api-spec.md`（覆盖实时 WS、文件 REST、临时 `oss://` URL 上传）。
+  - 已生成 Skill UI 元数据：`skills/aliyun-bailian-funasr/agents/openai.yaml`。
   - 已完成 Skill 格式校验：`uv run --with pyyaml quick_validate.py` 通过（启用 `PYTHONUTF8=1`）。
   - `PLANS.md` 已追加本次 Skill 沉淀任务执行进度，便于后续继续迭代。
   - 已将 Skill 同步到全局目录：`C:\Users\ZJHSteven\.codex\skills\aliyun-bailian-funasr`，可在后续项目直接复用。
