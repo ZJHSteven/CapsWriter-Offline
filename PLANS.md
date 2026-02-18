@@ -1,5 +1,44 @@
 # ExecPlan（阿里百炼云端改造）
 
+## ExecPlan（2026-02-18：实时链路状态机重构）
+
+### 目标
+- 去掉实时链路的本地“60 秒工程分段 + 本地文本拼接”依赖。
+- 改为“单次按键会话 = 单个云端 WebSocket 任务”。
+- 仅在 `sentence_end=true` 或 `end_time!=null` 时将句子定稿，避免中间快照重复/覆盖。
+
+### 改造范围
+1. `util/server/asr_aliyun_realtime.py`
+- 重写为“会话管理器”模式：
+  - 首包打开云端 WS + `run-task`
+  - 流式送音频 chunk
+  - 后台消费 `result-generated` 事件
+  - 使用句子状态机（按 `begin_time` 归档）维护最终句列表
+  - `finish-task` 后等待 `task-finished`，返回最终文本
+
+2. `util/server/server_ws_recv.py`
+- `model_type=aliyun_realtime` + `source=mic` 时：
+  - 不再按 `seg_duration/seg_overlap` 切 60 秒工程片段
+  - 改为传输层 100ms chunk 入队
+  - 结束时发送一个“final 控制任务”触发 `finish-task`
+
+3. `util/server/server_init_recognizer.py`
+- aliyun 模式不再走 `recognize()` 的本地拼接流程
+- 改为调用 `AliyunRealtimeRecognizer.process_task(task)`
+- 仅在会话结束时产出 `Result(is_final=True)` 发回客户端
+
+### 验证
+- 语法检查：`python -m py_compile` 覆盖改动文件。
+- 关键日志验证：
+  - 会话开始/结束日志
+  - `task-finished` 到达
+  - 最终文本长度与句子数
+
+### 风险与回滚
+- 风险：若云端回包缺少 `begin_time`，句子归档可能退化。
+- 缓解：增加“未知句 fallback key”与最终兜底拼接。
+- 回滚：可回退到 `b1ea34e` 并恢复原 `recognize()` 路径。
+
 ## 背景
 - 当前目录是可运行快照（含用户本地热词与启动脚本），但不是 Git 仓库。
 - 目标是在用户 GitHub Fork 中继续开发，并将 ASR 从本地模型迁移到阿里云百炼。

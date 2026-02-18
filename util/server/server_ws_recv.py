@@ -11,6 +11,7 @@ from base64 import b64decode
 
 import websockets
 
+from config import ServerConfig as Config
 from util.server.server_cosmic import console, Cosmic
 from util.server.server_classes import Task
 from util.constants import AudioFormat
@@ -22,6 +23,10 @@ logger = get_logger('server')
 
 # 麦克风接收状态指示器
 status_mic = Status('正在接收音频', spinner='point')
+
+# 百炼实时链路的传输层分帧（100ms），仅用于网络发送节奏，不是“语义分句”。
+ALIYUN_STREAM_FRAME_SECONDS = 0.1
+ALIYUN_STREAM_FRAME_BYTES = AudioFormat.seconds_to_bytes(ALIYUN_STREAM_FRAME_SECONDS)
 
 
 class AudioCache:
@@ -52,6 +57,112 @@ class AudioCache:
         self.byte_count = 0
 
 
+def _submit_task(
+    queue_in,
+    source: str,
+    data: bytes,
+    offset: float,
+    task_id: str,
+    socket_id: str,
+    is_final: bool,
+    time_start: float,
+) -> None:
+    """
+    统一封装任务入队逻辑，避免重复构造 Task。
+
+    说明：
+    - aliyun 实时模式下不依赖 overlap/offset 做文本拼接，因此 overlap 固定为 0。
+    - 本地模型模式仍可使用 offset（日志与时长统计）。
+    """
+    task = Task(
+        source=source,
+        data=data,
+        offset=offset,
+        task_id=task_id,
+        socket_id=socket_id,
+        overlap=0.0,
+        is_final=is_final,
+        time_start=time_start,
+        time_submit=time.time(),
+    )
+    queue_in.put(task)
+
+
+def _handle_aliyun_stream_message(
+    queue_in,
+    source: str,
+    is_final: bool,
+    task_id: str,
+    socket_id: str,
+    time_start: float,
+    data: bytes,
+    cache: AudioCache,
+) -> None:
+    """
+    百炼实时链路（会话模式）专用处理：
+    1. 只做“传输层 100ms 分帧”后入队，不做 60 秒工程切段。
+    2. final 消息只作为会话结束信号，触发云端 finish-task。
+    """
+    global status_mic
+
+    cache.chunks += data
+    cache.byte_count += len(data)
+
+    if not is_final:
+        if source == 'mic':
+            status_mic.start()
+
+        while len(cache.chunks) >= ALIYUN_STREAM_FRAME_BYTES:
+            segment_data = cache.chunks[:ALIYUN_STREAM_FRAME_BYTES]
+            cache.chunks = cache.chunks[ALIYUN_STREAM_FRAME_BYTES:]
+            _submit_task(
+                queue_in=queue_in,
+                source=source,
+                data=segment_data,
+                offset=cache.offset,
+                task_id=task_id,
+                socket_id=socket_id,
+                is_final=False,
+                time_start=time_start,
+            )
+            cache.offset += ALIYUN_STREAM_FRAME_SECONDS
+        return
+
+    # is_final=True：先把残留数据送完，再发送一个空数据 final 控制任务。
+    if source == 'mic':
+        status_mic.stop()
+
+    if cache.chunks:
+        remain_data = cache.chunks
+        _submit_task(
+            queue_in=queue_in,
+            source=source,
+            data=remain_data,
+            offset=cache.offset,
+            task_id=task_id,
+            socket_id=socket_id,
+            is_final=False,
+            time_start=time_start,
+        )
+        cache.offset += AudioFormat.bytes_to_seconds(len(remain_data))
+
+    _submit_task(
+        queue_in=queue_in,
+        source=source,
+        data=b'',
+        offset=cache.offset,
+        task_id=task_id,
+        socket_id=socket_id,
+        is_final=True,
+        time_start=time_start,
+    )
+
+    logger.debug(
+        f"提交百炼实时会话结束信号，任务ID: {task_id}, 累计时长: {cache.total_duration:.2f}s"
+    )
+    cache.reset()
+
+
 async def message_handler(websocket, message: dict, cache: AudioCache) -> None:
     """
     处理客户端发送的音频消息
@@ -74,14 +185,29 @@ async def message_handler(websocket, message: dict, cache: AudioCache) -> None:
     task_id = message['task_id']
     socket_id = str(websocket.id)
 
-    # 从消息中获取分段参数（由客户端决定）
-    seg_duration = message['seg_duration']
-    seg_overlap = message['seg_overlap']
-    seg_threshold = seg_duration + seg_overlap * 2
-
     try:
         # base64 解码音频数据（float32, 16kHz, mono）
         data = b64decode(message['data'])
+
+        # 云端实时模式：不走本地 60 秒工程分段，改为会话流式入队。
+        if Config.model_type.lower() == 'aliyun_realtime' and source == 'mic':
+            _handle_aliyun_stream_message(
+                queue_in=queue_in,
+                source=source,
+                is_final=is_final,
+                task_id=task_id,
+                socket_id=socket_id,
+                time_start=message['time_start'],
+                data=data,
+                cache=cache,
+            )
+            return
+
+        # 其余模式保留旧逻辑（本地模型 / 旧文件链路）
+        seg_duration = message['seg_duration']
+        seg_overlap = message['seg_overlap']
+        seg_threshold = seg_duration + seg_overlap * 2
+
         cache.chunks += data
         cache.byte_count += len(data)
 

@@ -3,13 +3,16 @@ from multiprocessing import Queue
 import queue
 import signal
 import atexit
+from typing import Optional
 from platform import system
 from config import ServerConfig as Config
 from util.model_config import ParaformerArgs, ModelPaths, SenseVoiceArgs, FunASRNanoGGUFArgs
 from util.server.server_check_model import check_model
 from util.server.server_cosmic import console
-from util.server.server_recognize import recognize
-from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer
+from util.server.server_classes import Result
+from util.server.server_recognize import recognize, format_text
+from util.server.text_merge import tokens_to_text
+from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer, AliyunFinalResult
 from util.tools.empty_working_set import empty_current_working_set
 from util.logger import get_logger
 
@@ -18,14 +21,22 @@ logger = get_logger('server')
 
 # 全局变量，用于跟踪资源状态
 _resources_initialized = False
+_active_recognizer = None
 
 
 def cleanup_recognizer_resources():
     """清理识别器资源"""
-    global _resources_initialized
+    global _resources_initialized, _active_recognizer
 
     if not _resources_initialized:
         return
+
+    if _active_recognizer is not None and hasattr(_active_recognizer, 'close'):
+        try:
+            _active_recognizer.close()
+            logger.info("已关闭识别器外部资源")
+        except Exception as e:
+            logger.warning(f"关闭识别器资源时发生异常: {e}", exc_info=True)
 
     logger.debug("识别子进程资源清理完成")
 
@@ -47,11 +58,51 @@ def signal_handler(signum, frame):
     exit(0)
 
 
+def _build_result_from_aliyun_final(task, final_result: AliyunFinalResult) -> Result:
+    """
+    把 aliyun 会话最终结果转换为项目统一的 Result 对象。
+
+    这里不再做本地片段拼接，直接使用云端句子状态机汇总后的最终文本。
+    """
+    result = Result(task.task_id, task.socket_id, task.source)
+    result.duration = float(final_result.duration)
+    result.time_start = float(final_result.time_start or task.time_start)
+    result.time_submit = float(final_result.time_submit or task.time_submit)
+    result.time_complete = time.time()
+
+    # 云端已完成句子级定稿，保留本地格式化（数字与中英空格）能力。
+    result.text = format_text(final_result.text, None)
+
+    result.tokens = list(final_result.tokens)
+    result.timestamps = list(final_result.timestamps)
+
+    if result.tokens:
+        result.text_accu = format_text(tokens_to_text(result.tokens), None)
+    else:
+        result.text_accu = result.text
+
+    result.is_final = True
+    return result
+
+
+def _recognize_aliyun_stream_task(recognizer: AliyunRealtimeRecognizer, task) -> Optional[Result]:
+    """
+    处理 aliyun 实时会话任务。
+
+    - 非 final：仅推送音频 chunk，不回传结果（避免中间快照干扰上屏）
+    - final：触发 finish-task，等待 task-finished，回传最终结果
+    """
+    final_result = recognizer.process_task(task)
+    if final_result is None:
+        return None
+    return _build_result_from_aliyun_final(task, final_result)
+
+
 
 
 
 def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue, sockets_id):
-    global _resources_initialized
+    global _resources_initialized, _active_recognizer
 
     logger.info("识别子进程启动")
     logger.debug(f"系统平台: {system()}")
@@ -129,6 +180,7 @@ def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue,
     except Exception as e:
         logger.error(f"模型加载失败: {e}", exc_info=True)
         raise
+    _active_recognizer = recognizer
 
     console.print(f'[green4]语音模型载入完成 ({model_type})', end='\n\n')
     logger.info(f"语音模型加载完成 ({model_type})，耗时: {time.time() - t1:.2f}s")
@@ -181,7 +233,12 @@ def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue,
             logger.debug(f"任务所属连接已断开，跳过处理，任务ID: {task.task_id}")
             continue
 
-        result = recognize(recognizer, punc_model, task)   # 执行识别
+        if model_type == 'aliyun_realtime':
+            result = _recognize_aliyun_stream_task(recognizer, task)
+            if result is None:
+                continue
+        else:
+            result = recognize(recognizer, punc_model, task)   # 执行识别
         queue_out.put(result)      # 返回结果
 
     # 清理完成

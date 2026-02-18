@@ -1,26 +1,24 @@
 # coding: utf-8
 """
-阿里云百炼实时 ASR 适配器。
+阿里云百炼实时 ASR 会话管理器。
 
-本模块的目标是把阿里云百炼实时 WebSocket 接口，封装成与当前项目
-识别流程兼容的「recognizer + stream」接口：
-
-- recognizer.create_stream()
-- stream.accept_waveform(...)
-- recognizer.decode_stream(stream)
-- stream.result.{text,tokens,timestamps}
-
-这样可以复用 `server_recognize.py` 现有的拼接、去重、后处理逻辑，
-减少迁移时对主流程的改动范围。
+设计目标：
+1. 一个本地录音任务（task_id）对应一个云端 WebSocket 会话，不再本地 60 秒切段后再拼接。
+2. 让云端负责分句与标点，本地只做句子级状态机归档：
+   - `sentence_end=false`: 覆盖更新当前句
+   - `sentence_end=true` 或 `end_time!=null`: 句子定稿
+3. 在 `finish-task` + `task-finished` 后一次性产出最终文本，避免中间快照重复叠加。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import websockets
@@ -31,40 +29,52 @@ logger = get_logger('server')
 
 
 @dataclass
-class AliyunStreamResult:
-    """单个片段识别结果容器。"""
+class AliyunFinalResult:
+    """单次实时会话的最终结果。"""
+    text: str
+    tokens: List[str]
+    timestamps: List[float]
+    duration: float
+    time_start: float
+    time_submit: float
+
+
+@dataclass
+class _SentenceState:
+    """句子状态：同一句会被多次覆盖更新，直到定稿。"""
+    key: str
+    order: int
+    begin_time: Optional[float] = None
     text: str = ''
+    is_final: bool = False
     tokens: List[str] = field(default_factory=list)
     timestamps: List[float] = field(default_factory=list)
 
 
-class AliyunRealtimeStream:
-    """
-    与现有识别流程兼容的流对象。
-
-    当前实现按“单片段请求”工作：
-    - `accept_waveform` 保存本片段音频
-    - `decode_stream` 时一次性提交到云端并等待结果
-    """
-
-    def __init__(self) -> None:
-        self.samplerate: int = 16000
-        self.samples: np.ndarray = np.array([], dtype=np.float32)
-        self.result = AliyunStreamResult()
-
-    def accept_waveform(self, samplerate: int, samples: np.ndarray) -> None:
-        self.samplerate = int(samplerate)
-        self.samples = np.asarray(samples, dtype=np.float32)
+@dataclass
+class _SessionState:
+    """云端实时会话状态。"""
+    local_task_id: str
+    cloud_task_id: str
+    samplerate: int
+    ws: object
+    reader_task: asyncio.Task
+    time_start: float
+    time_submit: float
+    duration: float = 0.0
+    finished_event: asyncio.Event = field(default_factory=asyncio.Event)
+    error_message: str = ''
+    sentence_seq: int = 0
+    sentences: Dict[str, _SentenceState] = field(default_factory=dict)
 
 
 class AliyunRealtimeRecognizer:
     """
-    百炼实时识别器适配类。
+    百炼实时识别器（会话模式）。
 
-    注意：
-    - 这里使用 WebSocket 原生协议，避免引入额外 SDK 依赖。
-    - 返回结果优先使用 `words` 字段提取 token 与时间戳；若服务端未返回
-      words，则回退为“文本拆字 + 无时间戳”模式，由上层执行兜底。
+    调用方式（同步）：
+    - `process_task(task)` 非 final：推送音频 chunk，返回 None
+    - `process_task(task)` final：发送 finish-task，等待 task-finished，返回最终结果
     """
 
     def __init__(
@@ -92,35 +102,116 @@ class AliyunRealtimeRecognizer:
         self.connect_timeout = float(connect_timeout)
         self.response_timeout = float(response_timeout)
 
-    def create_stream(self) -> AliyunRealtimeStream:
-        return AliyunRealtimeStream()
-
-    def decode_stream(self, stream: AliyunRealtimeStream) -> None:
-        """
-        按本项目既有同步接口执行解码。
-
-        识别子进程主循环是同步调用，因此这里使用 `asyncio.run` 执行
-        一次异步 WebSocket 请求。
-        """
-        text, tokens, timestamps = asyncio.run(
-            self._decode_once(stream.samples, stream.samplerate)
+        self._sessions: Dict[str, _SessionState] = {}
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._run_loop,
+            name='aliyun-realtime-loop',
+            daemon=True,
         )
-        stream.result.text = text
-        stream.result.tokens = tokens
-        stream.result.timestamps = timestamps
+        self._loop_thread.start()
 
-    async def _decode_once(self, samples: np.ndarray, samplerate: int) -> Tuple[str, List[str], List[float]]:
-        pcm16_bytes = self._float32_to_pcm16_bytes(samples)
-        if not pcm16_bytes:
-            return "", [], []
+    def process_task(self, task) -> Optional[AliyunFinalResult]:
+        """
+        处理单个输入任务（由识别进程主循环同步调用）。
 
-        task_id = uuid.uuid4().hex
+        输入任务来自 `server_ws_recv.py`：
+        - 非 final 任务：携带 100ms 左右音频数据
+        - final 任务：仅作为“会话结束”控制信号
+        """
+        self._ensure_session(
+            local_task_id=task.task_id,
+            samplerate=int(task.samplerate),
+            time_start=float(task.time_start),
+            time_submit=float(task.time_submit),
+        )
+        session = self._sessions[task.task_id]
+
+        samples = np.frombuffer(task.data, dtype=np.float32) if task.data else np.array([], dtype=np.float32)
+        if samples.size > 0:
+            session.duration += len(samples) / max(1, int(task.samplerate))
+            pcm_bytes = self._float32_to_pcm16_bytes(samples)
+            self._run_coro(
+                self._send_pcm(local_task_id=task.task_id, pcm_bytes=pcm_bytes),
+                timeout=self.response_timeout,
+            )
+
+        if not task.is_final:
+            return None
+
+        return self._run_coro(
+            self._finish_and_collect(local_task_id=task.task_id),
+            timeout=max(120.0, self.response_timeout * 3),
+        )
+
+    def close(self) -> None:
+        """关闭全部会话并停止后台事件循环线程。"""
+        try:
+            for local_task_id in list(self._sessions.keys()):
+                try:
+                    self._run_coro(self._close_session(local_task_id), timeout=10.0)
+                except Exception:
+                    logger.warning(f"关闭会话失败: {local_task_id}", exc_info=True)
+        finally:
+            if self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._loop_thread.is_alive():
+                self._loop_thread.join(timeout=2.0)
+
+    def _run_loop(self) -> None:
+        """后台线程：专门运行一个 asyncio 事件循环，承载所有云端 WS 会话。"""
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def _run_coro(self, coro, timeout: float):
+        """在后台事件循环中同步执行协程。"""
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return fut.result(timeout=timeout)
+
+    def _ensure_session(
+        self,
+        local_task_id: str,
+        samplerate: int,
+        time_start: float,
+        time_submit: float,
+    ) -> None:
+        """按需创建云端会话，保证一个 local task 对应一个 WS 连接。"""
+        if local_task_id in self._sessions:
+            return
+        self._run_coro(
+            self._open_session(
+                local_task_id=local_task_id,
+                samplerate=samplerate,
+                time_start=time_start,
+                time_submit=time_submit,
+            ),
+            timeout=self.connect_timeout + 10.0,
+        )
+
+    async def _open_session(
+        self,
+        local_task_id: str,
+        samplerate: int,
+        time_start: float,
+        time_submit: float,
+    ) -> None:
+        """建立云端 WS 连接并发送 run-task。"""
+        cloud_task_id = uuid.uuid4().hex
         headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        ws = await websockets.connect(
+            self.endpoint,
+            additional_headers=headers,
+            open_timeout=self.connect_timeout,
+            max_size=None,
+            ping_interval=20,
+            ping_timeout=20,
+        )
 
         run_task = {
             "header": {
                 "action": "run-task",
-                "task_id": task_id,
+                "task_id": cloud_task_id,
                 "streaming": "duplex",
             },
             "payload": {
@@ -139,41 +230,94 @@ class AliyunRealtimeRecognizer:
                 "input": {},
             },
         }
+        await ws.send(json.dumps(run_task, ensure_ascii=False))
+
+        session = _SessionState(
+            local_task_id=local_task_id,
+            cloud_task_id=cloud_task_id,
+            samplerate=samplerate,
+            ws=ws,
+            reader_task=None,
+            time_start=time_start,
+            time_submit=time_submit,
+        )
+        session.reader_task = asyncio.create_task(self._reader_loop(session))
+        self._sessions[local_task_id] = session
+        logger.info(f"已创建百炼实时会话: local_task_id={local_task_id}, cloud_task_id={cloud_task_id}")
+
+    async def _send_pcm(self, local_task_id: str, pcm_bytes: bytes) -> None:
+        """向指定会话发送音频二进制帧。"""
+        if not pcm_bytes:
+            return
+        session = self._sessions.get(local_task_id)
+        if not session:
+            return
+        await session.ws.send(pcm_bytes)
+
+    async def _finish_and_collect(self, local_task_id: str) -> AliyunFinalResult:
+        """发送 finish-task，等待 task-finished，然后汇总最终文本。"""
+        session = self._sessions.get(local_task_id)
+        if not session:
+            return AliyunFinalResult(
+                text='',
+                tokens=[],
+                timestamps=[],
+                duration=0.0,
+                time_start=0.0,
+                time_submit=0.0,
+            )
 
         finish_task = {
             "header": {
                 "action": "finish-task",
-                "task_id": task_id,
+                "task_id": session.cloud_task_id,
                 "streaming": "duplex",
             },
-            "payload": {
-                "input": {},
-            },
+            "payload": {"input": {}},
         }
+        try:
+            await session.ws.send(json.dumps(finish_task, ensure_ascii=False))
+            await asyncio.wait_for(session.finished_event.wait(), timeout=max(120.0, self.response_timeout * 3))
+            if session.error_message:
+                raise RuntimeError(session.error_message)
 
-        last_text = ""
-        last_tokens: List[str] = []
-        last_timestamps: List[float] = []
+            text, tokens, timestamps = self._build_final_text(session)
+            return AliyunFinalResult(
+                text=text,
+                tokens=tokens,
+                timestamps=timestamps,
+                duration=session.duration,
+                time_start=session.time_start,
+                time_submit=session.time_submit,
+            )
+        finally:
+            await self._close_session(local_task_id)
 
-        async with websockets.connect(
-            self.endpoint,
-            additional_headers=headers,
-            open_timeout=self.connect_timeout,
-            max_size=None,
-            ping_interval=20,
-            ping_timeout=20,
-        ) as ws:
-            await ws.send(json.dumps(run_task, ensure_ascii=False))
+    async def _close_session(self, local_task_id: str) -> None:
+        """关闭并清理会话对象。"""
+        session = self._sessions.pop(local_task_id, None)
+        if not session:
+            return
 
-            # 以 100ms 帧发送，兼顾兼容性与实时服务稳定性。
-            frame_bytes = max(1, int(samplerate * 0.1) * 2)
-            for offset in range(0, len(pcm16_bytes), frame_bytes):
-                await ws.send(pcm16_bytes[offset: offset + frame_bytes])
+        try:
+            if session.reader_task and not session.reader_task.done():
+                session.reader_task.cancel()
+                try:
+                    await session.reader_task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            try:
+                await session.ws.close()
+            except Exception:
+                pass
+        logger.info(f"已关闭百炼实时会话: local_task_id={local_task_id}")
 
-            await ws.send(json.dumps(finish_task, ensure_ascii=False))
-
+    async def _reader_loop(self, session: _SessionState) -> None:
+        """后台读取云端事件并更新句子状态机。"""
+        try:
             while True:
-                raw = await asyncio.wait_for(ws.recv(), timeout=self.response_timeout)
+                raw = await session.ws.recv()
                 if isinstance(raw, bytes):
                     continue
 
@@ -182,66 +326,170 @@ class AliyunRealtimeRecognizer:
                 event = header.get("event", "")
 
                 if event == "result-generated":
-                    text, tokens, timestamps = self._extract_result(message)
-                    if text:
-                        last_text = text
-                    if tokens:
-                        last_tokens = tokens
-                        last_timestamps = timestamps
+                    self._consume_result_generated(session, message)
                     continue
 
-                if event == "task-failed":
-                    raise RuntimeError(f"阿里云实时识别失败: {message}")
-
                 if event == "task-finished":
-                    break
+                    session.finished_event.set()
+                    return
 
-        # 若服务端没有返回 words 字段，回退为文本拆字。
-        if not last_tokens and last_text:
-            last_tokens = [ch for ch in last_text.replace(" ", "")]
-            last_timestamps = []
+                if event == "task-failed":
+                    session.error_message = f"阿里云实时识别失败: {message}"
+                    session.finished_event.set()
+                    return
+        except Exception as e:
+            session.error_message = f"读取云端结果失败: {e}"
+            session.finished_event.set()
 
-        return last_text, last_tokens, last_timestamps
+    def _consume_result_generated(self, session: _SessionState, message: dict) -> None:
+        """
+        消费一条 result-generated 事件。
 
-    @staticmethod
-    def _float32_to_pcm16_bytes(samples: np.ndarray) -> bytes:
-        clipped = np.clip(samples, -1.0, 1.0)
-        pcm16 = (clipped * 32767.0).astype(np.int16)
-        return pcm16.tobytes()
-
-    @staticmethod
-    def _extract_result(message: dict) -> Tuple[str, List[str], List[float]]:
+        状态机规则：
+        - 同一句（key 通常由 begin_time 决定）反复覆盖更新
+        - `sentence_end=true` 或 `end_time!=null` 时标记为最终句
+        """
         payload = message.get("payload", {})
-        output = payload.get("output", {})
+        output = payload.get("output", {}) if isinstance(payload, dict) else {}
         sentence = output.get("sentence", {}) if isinstance(output, dict) else {}
+        if not isinstance(sentence, dict):
+            return
 
-        text = sentence.get("text") or output.get("text") or ""
-        words = sentence.get("words", []) if isinstance(sentence, dict) else []
+        # 文档说明 heartbeat 可以直接跳过，不参与文本汇总。
+        heartbeat = bool(sentence.get("heartbeat") or output.get("heartbeat"))
+        if heartbeat:
+            return
+
+        text = str(sentence.get("text") or output.get("text") or "").strip()
+        words = sentence.get("words", [])
+        begin_time = self._to_seconds(sentence.get("begin_time"))
+        end_time = sentence.get("end_time")
+        sentence_end = bool(sentence.get("sentence_end"))
+
+        if not text and not words:
+            return
+
+        key = self._build_sentence_key(session=session, begin_time=begin_time, sentence=sentence)
+        sentence_state = session.sentences.get(key)
+        if sentence_state is None:
+            sentence_state = _SentenceState(key=key, order=session.sentence_seq, begin_time=begin_time)
+            session.sentence_seq += 1
+            session.sentences[key] = sentence_state
+
+        if begin_time is not None:
+            sentence_state.begin_time = begin_time
+        if text:
+            sentence_state.text = text
+
+        tokens, timestamps = self._extract_words(words)
+        if tokens:
+            sentence_state.tokens = tokens
+            sentence_state.timestamps = timestamps
+
+        if sentence_end or end_time is not None:
+            sentence_state.is_final = True
+
+    def _build_sentence_key(
+        self,
+        session: _SessionState,
+        begin_time: Optional[float],
+        sentence: dict,
+    ) -> str:
+        """
+        构造句子 key。
+
+        优先使用 begin_time（官方推荐可区分句子），缺失时退化到句子 ID / 未完成句。
+        """
+        if begin_time is not None:
+            return f"begin:{int(begin_time * 1000)}"
+
+        sentence_id = sentence.get("sentence_id")
+        if sentence_id is not None:
+            return f"id:{sentence_id}"
+
+        for key, state in session.sentences.items():
+            if not state.is_final:
+                return key
+
+        return f"unknown:{session.sentence_seq}"
+
+    def _build_final_text(self, session: _SessionState) -> Tuple[str, List[str], List[float]]:
+        """把句子状态机汇总为最终文本与时间戳。"""
+        finals = [item for item in session.sentences.values() if item.is_final]
+        if not finals:
+            finals = list(session.sentences.values())
+
+        finals.sort(key=lambda item: (
+            item.begin_time if item.begin_time is not None else float('inf'),
+            item.order,
+        ))
+
+        text = ''.join(item.text for item in finals if item.text).strip()
 
         tokens: List[str] = []
         timestamps: List[float] = []
+        for item in finals:
+            if not item.tokens:
+                continue
+            tokens.extend(item.tokens)
+            timestamps.extend(item.timestamps)
 
+        # 兜底：若 words 缺失，仍保证 text_accu 链路可继续。
+        if not tokens and text:
+            tokens = [ch for ch in text.replace(' ', '')]
+            timestamps = []
+
+        return text, tokens, timestamps
+
+    @staticmethod
+    def _extract_words(words: object) -> Tuple[List[str], List[float]]:
+        """从 words 字段提取 token 与时间戳（秒）。"""
+        if not isinstance(words, list):
+            return [], []
+
+        tokens: List[str] = []
+        timestamps: List[float] = []
         for item in words:
             if not isinstance(item, dict):
                 continue
-            token = str(item.get("text", "")).strip()
+
+            base_text = str(item.get("text", "")).strip()
+            punctuation = str(item.get("punctuation", ""))
+            token = f"{base_text}{punctuation}".strip()
             if not token:
                 continue
 
-            begin_time = item.get("begin_time")
+            begin_time = AliyunRealtimeRecognizer._to_seconds(item.get("begin_time"))
             if begin_time is None:
                 continue
 
-            try:
-                ts = float(begin_time)
-            except (TypeError, ValueError):
-                continue
-
-            # 官方事件示例常见毫秒单位，这里统一转为秒。
-            if ts > 1000:
-                ts = ts / 1000.0
-
             tokens.append(token)
-            timestamps.append(ts)
+            timestamps.append(begin_time)
 
-        return text, tokens, timestamps
+        return tokens, timestamps
+
+    @staticmethod
+    def _to_seconds(value: object) -> Optional[float]:
+        """把毫秒或秒统一转成秒。"""
+        if value is None:
+            return None
+        try:
+            # JSON 里大多是整数毫秒；字符串纯数字也按毫秒处理。
+            if isinstance(value, int):
+                return float(value) / 1000.0
+            if isinstance(value, str) and value.isdigit():
+                return float(value) / 1000.0
+
+            number = float(value)
+            if number > 1000:
+                return number / 1000.0
+            return number
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _float32_to_pcm16_bytes(samples: np.ndarray) -> bytes:
+        """把 float32 [-1,1] 音频转为 PCM16 字节流。"""
+        clipped = np.clip(samples, -1.0, 1.0)
+        pcm16 = (clipped * 32767.0).astype(np.int16)
+        return pcm16.tobytes()

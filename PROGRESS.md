@@ -1,7 +1,7 @@
 # 项目状态快照
 
 ## 当前结论（必须最新）
-- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成基线同步，开始云端识别改造。
+- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并进入“实时链路状态机重构”阶段。
 - 已完成：
   - 已核对官方文档与 Context7 来源，可支撑本次改造。
   - 已完成本地快照基线提交并推送到 fork 分支。
@@ -15,11 +15,18 @@
   - 新增本地文件上传 URL 解析器：`util/client/transcribe/file_upload_resolver.py`（支持 `presigned_put` 与 `custom_api`）。
   - `util/client/transcribe/file_transcriber.py` 已重构为独立 REST 通道，不再依赖本地实时服务端 WebSocket。
   - `config.py` 已新增文件 REST 与上传通道配置项。
-- 正在做：将文件转写从本地 WebSocket 识别链路迁移到百炼 REST 异步链路（独立通道）。
+  - 新增实时链路重构执行计划（`PLANS.md`）：明确“单次会话直连云端 + 句子状态机定稿”的改造方向。
+  - `util/server/asr_aliyun_realtime.py` 已重写为会话管理器：
+    - 一个本地任务对应一个云端 WS 会话
+    - 按 `sentence_end/end_time` 做句子定稿
+    - `finish-task` 后等待 `task-finished` 再返回最终文本
+  - `util/server/server_ws_recv.py` 已在 aliyun 实时模式下切换为“传输层 100ms 分帧入队”，不再走本地 60 秒工程切段。
+  - `util/server/server_init_recognizer.py` 已为 aliyun 模式接入新会话接口，仅在 final 时回传结果，避免中间快照干扰输出。
+- 正在做：联调“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路。
 - 下一步：
-  - 跑通语法检查与最小链路自测。
-  - 联调 presigned_put / custom_api 两种上传模式。
-  - 补充 readme 示例配置与使用步骤。
+  - 用真实语音流验证句子状态机在连续说话场景下无“覆盖前文/重复叠加”问题。
+  - 评估是否需要把客户端发送节奏也统一为固定 100ms（当前已在服务端做 100ms 传输分帧）。
+  - 补充 readme 的“实时链路状态机”说明与调参建议。
 
 ## 关键决策与理由（防止“吃书”）
 - 决策A：实时听写主链路采用 WebSocket，而不是仅 REST。
@@ -34,6 +41,8 @@
   - 原因：彻底解耦后端资源占用，避免文件任务影响日常麦克风实时听写。
 - 决策F：上传层采用“临时签名上传 + 自定义上传 API”双模式。
   - 原因：避免硬编码单一 OSS SDK，兼容不同对象存储与企业内网网关方案。
+- 决策G：实时链路改为“单会话直连云端 + 句子状态机定稿”，不再依赖本地 60 秒工程分段与文本拼接。
+  - 原因：`result-generated` 是句子快照更新，不是稳定增量；本地分段拼接会放大覆盖/重复风险。
 
 ## 常见坑 / 复现方法
 - 坑1：REST 文件识别不支持本地文件直传与 base64。
@@ -42,3 +51,5 @@
   - 复现：启动长视频转写后，按热键录音会出现响应变慢或等待。
 - 坑3：云端模式下若在模块顶层导入本地 GGUF 引擎，可能触发循环导入并导致服务端启动失败。
   - 复现：`model_type=aliyun_realtime`，但 `server_init_recognizer.py` 顶层仍导入 `util.fun_asr_gguf`。
+- 坑4：把 `result-generated` 当“追加文本”而不是“同句覆盖更新”，会出现 A + A' + B 的重复拼接问题。
+  - 复现：连续说话时对每条 `result-generated` 直接 `total += text`，最终文本会重复堆叠。
