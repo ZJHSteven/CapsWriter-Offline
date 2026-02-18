@@ -1,0 +1,4 @@
+interface:
+  display_name: "阿里云百炼FunASR"
+  short_description: "规范化处理实时WS、文件REST和oss临时URL上传流程"
+  default_prompt: "请基于阿里云百炼Fun-ASR官方协议完成实时WebSocket或文件REST接入，并按句子状态机避免重复拼接。"
