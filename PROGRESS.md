@@ -1,7 +1,7 @@
 # 项目状态快照
 
 ## 当前结论（必须最新）
-- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并进入“实时链路状态机重构”阶段。
+- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并完成“实时链路止血版稳健性改造（失败保底 + 失败任务落盘 + 手动重试入口）”。
 - 已完成：
   - 已核对官方文档与 Context7 来源，可支撑本次改造。
   - 已完成本地快照基线提交并推送到 fork 分支。
@@ -28,14 +28,35 @@
   - 已完成 Skill 格式校验：`uv run --with pyyaml quick_validate.py` 通过（启用 `PYTHONUTF8=1`）。
   - `PLANS.md` 已追加本次 Skill 沉淀任务执行进度，便于后续继续迭代。
   - 已将 Skill 同步到全局目录：`C:\Users\ZJHSteven\.codex\skills\aliyun-bailian-funasr`，可在后续项目直接复用。
+  - 新增失败任务存储模块：`util/server/failed_task_store.py`
+    - 失败任务目录 `runtime/failed_tasks/YYYYMMDD/<task_id>/`
+    - 保存 `meta.json/sentences.json/salvage.txt/error.txt/ws_events.jsonl/audio.pcm`
+  - `util/server/asr_aliyun_realtime.py` 已加入“稳健性止血版”能力：
+    - 会话级 PCM 临时落盘（按按下/抬起整次会话累计）
+    - 中途 WS 异常 / `task-failed` / `finish-task` 超时统一走失败保底
+    - 服务端终端打印已定稿句与失败保底文本
+    - 结构化 WS 事件摘要日志（用于排障）
+    - 自动重试一次（基于整次会话 PCM 重放）
+  - `util/server/server_init_recognizer.py` 已增加任务级异常隔离，单任务失败不再直接打崩识别子进程。
+  - 扩展服务端结果协议（`Result` + `server_ws_send`）支持失败状态、错误信息、保底文本、失败任务引用。
+  - 客户端结果处理已支持失败保底消息：
+    - 默认不自动上屏（避免误打字）
+    - 终端提示失败状态/保底文本/重试提示
+  - 文字备份已与音频备份解耦：
+    - `save_text_backup` 独立配置
+    - `DiaryWriter` 支持按保留天数清理旧 Markdown（默认 30 天）
+  - 新增手动重试脚本入口：
+    - `retry_failed_tasks.py`（终端交互列出/选择/重试）
+    - `retry_failed_tasks.bat`（Windows 双击入口）
 - 正在做：联调“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路。
-- 正在做：联调“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路，并优化时延指标口径（偏向体感）。
+- 正在做：联调“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路，并验证失败保底/自动重试路径。
 - 下一步：
   - 用真实语音流验证句子状态机在连续说话场景下无“覆盖前文/重复叠加”问题。
+  - 完成 Phase 2：云端会话有限并发（当前仍是识别子进程串行调度，final 任务会阻塞后续任务）。
   - 评估是否需要把客户端发送节奏也统一为固定 100ms（当前已在服务端做 100ms 传输分帧）。
   - 补充 readme 的“实时链路状态机”说明与调参建议。
   - 观察新“尾包时延”指标（抬键 -> 开始上屏）与“总耗时”在短句场景下的差异，确认体验改进效果。
-  - 用新 Skill 在独立示例项目复用一次，验证可迁移性与文档完备性。
+  - 验证 `retry_failed_tasks.py` 在多失败任务并存时的交互体验，并视需要补充 `show/list/retry all` 参数模式。
 
 ## 关键决策与理由（防止“吃书”）
 - 决策A：实时听写主链路采用 WebSocket，而不是仅 REST。
@@ -54,6 +75,10 @@
   - 原因：`result-generated` 是句子快照更新，不是稳定增量；本地分段拼接会放大覆盖/重复风险。
 - 决策H：将 Fun-ASR 协议知识沉淀为独立 Skill（含参考规范文件）。
   - 原因：后续跨项目复用时可直接套用标准状态机与接口模板，降低重复沟通与实现偏差。
+- 决策I：`task-finished` 仅作为“完整成功确认”，不再作为唯一结果出口。
+  - 原因：长任务最后一步超时/断网时，前面已转好的句子仍有保留价值，必须做保底恢复。
+- 决策J：失败任务重试基于“整次按下/抬起录音会话 PCM 文件”重放，而不是尝试续传原云端 WS 会话。
+  - 原因：云端实时 WS 会话断线后通常不可续；整段重放实现简单且可靠。
 
 ## 常见坑 / 复现方法
 - 坑1：REST 文件识别不支持本地文件直传与 base64。
@@ -66,5 +91,7 @@
   - 复现：连续说话时对每条 `result-generated` 直接 `total += text`，最终文本会重复堆叠。
 - 坑5：控制台“转录时延”若使用 `time_complete - time_submit`，会包含用户说话过程，容易被误解为“尾包等待时延”。
   - 复现：连续说话 10 秒后松键，显示时延常大于录音时长或接近总会话耗时。
-- 坑5：在 Windows + uv 管理 Python 环境下直接运行 Skill 校验脚本，可能出现 `yaml` 缺失或默认 GBK 解码失败。
+- 坑6：在 Windows + uv 管理 Python 环境下直接运行 Skill 校验脚本，可能出现 `yaml` 缺失或默认 GBK 解码失败。
   - 复现：直接执行 `python quick_validate.py`，未用 `uv run --with pyyaml` 且未设置 `PYTHONUTF8=1`。
+- 坑7：云端实时长任务若只依赖 `task-finished` 才返回结果，`finish` 确认超时会导致前面所有已定稿句全部丢失。
+  - 复现：长按说话 >120 秒，最后阶段网络抖动，服务端等待 `task-finished` 超时。

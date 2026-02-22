@@ -70,18 +70,29 @@ def _build_result_from_aliyun_final(task, final_result: AliyunFinalResult) -> Re
     result.time_submit = float(final_result.time_submit or task.time_submit)
     result.time_complete = time.time()
 
-    # 云端已完成句子级定稿，保留本地格式化（数字与中英空格）能力。
-    result.text = format_text(final_result.text, None)
+    # 成功结果保留本地格式化；失败保底结果尽量原样保留（包含 [未定稿] 标记）。
+    if getattr(final_result, 'status', 'success_confirmed') == 'success_confirmed':
+        result.text = format_text(final_result.text, None)
+    else:
+        result.text = final_result.text
 
     result.tokens = list(final_result.tokens)
     result.timestamps = list(final_result.timestamps)
 
-    if result.tokens:
+    if result.tokens and getattr(final_result, 'status', 'success_confirmed') == 'success_confirmed':
         result.text_accu = format_text(tokens_to_text(result.tokens), None)
     else:
         result.text_accu = result.text
 
     result.is_final = True
+    # 扩展状态字段：成功/失败保底都统一透传给客户端（客户端可选择不上屏）
+    result.status = getattr(final_result, 'status', 'success_confirmed') or 'success_confirmed'
+    result.error_code = getattr(final_result, 'error_code', '') or ''
+    result.error_message = getattr(final_result, 'error_message', '') or ''
+    result.salvage_text_finalized = getattr(final_result, 'salvage_text_finalized', '') or ''
+    result.salvage_text_partial = getattr(final_result, 'salvage_text_partial', '') or ''
+    result.needs_manual_retry = bool(getattr(final_result, 'needs_manual_retry', False))
+    result.retry_task_ref = getattr(final_result, 'retry_task_ref', '') or ''
     return result
 
 
@@ -149,6 +160,13 @@ def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue,
                 itn_enabled=Config.aliyun_enable_itn,
                 connect_timeout=Config.aliyun_connect_timeout,
                 response_timeout=Config.aliyun_response_timeout,
+                finish_confirm_timeout=getattr(Config, 'aliyun_finish_confirm_timeout', None),
+                auto_retry_once=getattr(Config, 'aliyun_auto_retry_once', True),
+                retry_backoff_seconds=getattr(Config, 'aliyun_retry_backoff_seconds', 0.5),
+                failed_task_store_enabled=getattr(Config, 'failed_task_store_enabled', True),
+                failed_task_store_dir=getattr(Config, 'failed_task_store_dir', 'runtime/failed_tasks'),
+                failed_audio_delete_on_replay_success=getattr(Config, 'failed_audio_delete_on_replay_success', True),
+                ws_log_verbosity=getattr(Config, 'aliyun_ws_log_verbosity', 'summary'),
             )
         elif model_type == 'fun_asr_nano':
             logger.debug("使用 Fun-ASR-Nano 模型")
@@ -233,13 +251,31 @@ def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue,
             logger.debug(f"任务所属连接已断开，跳过处理，任务ID: {task.task_id}")
             continue
 
-        if model_type == 'aliyun_realtime':
-            result = _recognize_aliyun_stream_task(recognizer, task)
-            if result is None:
-                continue
-        else:
-            result = recognize(recognizer, punc_model, task)   # 执行识别
-        queue_out.put(result)      # 返回结果
+        try:
+            if model_type == 'aliyun_realtime':
+                result = _recognize_aliyun_stream_task(recognizer, task)
+                if result is None:
+                    continue
+            else:
+                result = recognize(recognizer, punc_model, task)   # 执行识别
+            queue_out.put(result)      # 返回结果
+        except Exception as e:
+            # 任务级异常隔离：单任务失败不允许打崩整个识别子进程。
+            logger.error("识别任务失败（已隔离）: task_id=%s", getattr(task, 'task_id', 'unknown'), exc_info=True)
+            if model_type == 'aliyun_realtime' and getattr(task, 'is_final', False):
+                fail_result = Result(task.task_id, task.socket_id, task.source)
+                fail_result.duration = 0.0
+                fail_result.time_start = float(getattr(task, 'time_start', 0.0) or 0.0)
+                fail_result.time_submit = float(getattr(task, 'time_submit', 0.0) or 0.0)
+                fail_result.time_complete = time.time()
+                fail_result.text = ''
+                fail_result.text_accu = ''
+                fail_result.is_final = True
+                fail_result.status = 'failed_no_text'
+                fail_result.error_code = 'recognizer_task_exception'
+                fail_result.error_message = f'{type(e).__name__}: {e}'
+                queue_out.put(fail_result)
+            continue
 
     # 清理完成
     logger.info("识别子进程已退出")

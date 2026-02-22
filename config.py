@@ -31,6 +31,16 @@ class ServerConfig:
     aliyun_enable_itn = True
     aliyun_connect_timeout = 20.0
     aliyun_response_timeout = 40.0
+    # 等待 `task-finished` 的超时时间（秒）。超时后走“保底恢复 + 重试”流程，而不是直接崩任务。
+    aliyun_finish_confirm_timeout = 120.0
+    # 失败恢复策略（实时云端模式）
+    aliyun_auto_retry_once = True
+    aliyun_retry_backoff_seconds = 0.5
+    aliyun_ws_log_verbosity = 'summary'    # summary | full | error_only
+    # 失败任务落盘（音频 + 元数据 + 保底文本）
+    failed_task_store_enabled = True
+    failed_task_store_dir = 'runtime/failed_tasks'
+    failed_audio_delete_on_replay_success = True
 
     format_num = True       # 输出时是否将中文数字转为阿拉伯数字
     format_spell = True     # 输出时是否调整中英之间的空格
@@ -75,6 +85,10 @@ class ClientConfig:
 
     save_audio = False           # 是否保存录音文件
     audio_name_len = 20         # 将录音识别结果的前多少个字存储到录音文件名中，建议不要超过200
+    # 文字备份与音频备份解耦：即使不保存音频，也可以保留识别结果日记
+    save_text_backup = True
+    text_backup_retention_days = 30
+    text_backup_on_failure_salvage = True
 
     trash_punc = '，。,.'       # 识别结果要消除的末尾标点
 

@@ -224,6 +224,11 @@ class ResultProcessor:
         # 使用 text 字段（简单拼接结果，用于语音输入）
         text = message['text']
         original_text = text  # 保存原始识别结果
+        result_status = str(message.get('status') or ('success_confirmed' if message.get('is_final') else 'streaming'))
+        error_code = str(message.get('error_code') or '')
+        error_message = str(message.get('error_message') or '')
+        salvage_text_finalized = str(message.get('salvage_text_finalized') or '')
+        salvage_text_partial = str(message.get('salvage_text_partial') or '')
         # 历史口径：从服务端“开始识别该任务”到服务端结果完成的总耗时。
         # 对实时长录音来说，这个值会天然包含说话过程，因此常常大于录音时长。
         total_cost = message['time_complete'] - message['time_submit']
@@ -240,6 +245,42 @@ class ResultProcessor:
         if not message['is_final']:
             return
 
+        # 失败/保底结果：默认只打印和备份，不自动上屏（避免误打到错误窗口）。
+        if result_status != 'success_confirmed':
+            console.print(f'    [yellow]识别失败（保底）状态：{result_status}')
+            if error_code:
+                console.print(f'    [yellow]错误码：{error_code}')
+            if error_message:
+                console.print(f'    [yellow]错误信息：{error_message}')
+            if salvage_text_finalized:
+                console.print(f'    [cyan]已定稿保底：{salvage_text_finalized}')
+            if salvage_text_partial:
+                console.print(f'    [yellow]未定稿保底：{salvage_text_partial}')
+            retry_task_ref = str(message.get('retry_task_ref') or '')
+            if retry_task_ref:
+                console.print(f'    [yellow]失败任务引用：{retry_task_ref}')
+            if bool(message.get('needs_manual_retry')):
+                console.print('    [yellow]可稍后运行 retry_failed_tasks.py 进行重试')
+
+            # 失败时也允许写文字备份（默认开启），避免战果只停留在终端。
+            if getattr(Config, 'save_text_backup', True) and getattr(Config, 'text_backup_on_failure_salvage', True):
+                from util.client.diary.diary_writer import DiaryWriter
+                backup_text = salvage_text_finalized + (salvage_text_partial or '')
+                if backup_text:
+                    diary_writer = DiaryWriter()
+                    diary_writer.write(
+                        f"[ASR失败保底:{result_status}] {backup_text}",
+                        message['time_start'],
+                        None,
+                        retention_days=getattr(Config, 'text_backup_retention_days', None),
+                    )
+                    logger.info("已写入失败保底文字备份: task_id=%s", message.get('task_id'))
+
+            # 失败任务不再继续走热词/LLM/上屏链路，避免增加延迟或误输出。
+            self.state.pop_audio_file(message['task_id'])
+            console.line()
+            return
+
         # 繁体转换
         if Config.traditional_convert:
             try:
@@ -251,7 +292,6 @@ class ResultProcessor:
 
         # 热词替换
         # 1. 音素纠错
-        correction_result = self._hotword_manager.get_phoneme_corrector().correct(text, k=10)
         correction_result = self._hotword_manager.get_phoneme_corrector().correct(text, k=10)
         text = correction_result.text
 
@@ -342,7 +382,7 @@ class ResultProcessor:
             await self._text_output.output(text, paste=paste)
             get_state().set_output_text(text)
 
-        # 保存录音与写入 md 文件
+        # 保存录音与写入 md 文件（文字备份与音频备份解耦）
         file_audio = None
         if Config.save_audio:
             from util.client.diary.diary_writer import DiaryWriter
@@ -356,10 +396,17 @@ class ResultProcessor:
                 file_audio = file_manager.rename(text, message['time_start'])
                 logger.debug(f"保存录音文件: {file_audio}")
 
-            # 写入日记
+        # 无论是否保存音频，只要开启文字备份都写入日记（这是用户常用的“文字档案”能力）。
+        if getattr(Config, 'save_text_backup', True):
+            from util.client.diary.diary_writer import DiaryWriter
             diary_writer = DiaryWriter()
-            diary_writer.write(text, message['time_start'], file_audio)
-            logger.debug("写入 MD 文件")
+            diary_writer.write(
+                text,
+                message['time_start'],
+                file_audio,
+                retention_days=getattr(Config, 'text_backup_retention_days', None),
+            )
+            logger.debug("写入文字备份 MD 文件")
 
         # LLM 结果显示和保存
         if Config.llm_enabled and llm_result and llm_result.processed:

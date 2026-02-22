@@ -63,6 +63,10 @@ class Result:
         timestamps: 字级时间戳列表（秒）
         
         is_final: 是否已完成所有片段识别
+        status: 结果状态（向后兼容，默认 success_confirmed）
+        error_code/error_message: 失败时的错误信息
+        salvage_*: 失败保底文本（定稿/未定稿）
+        needs_manual_retry/retry_task_ref: 是否需要手动重试及失败任务引用
     """
     task_id: str
     socket_id: str
@@ -82,3 +86,12 @@ class Result:
     timestamps: List[float] = field(default_factory=list)
     
     is_final: bool = False
+
+    # 扩展字段（向后兼容）：不影响旧客户端读取已有字段
+    status: str = 'success_confirmed'
+    error_code: str = ''
+    error_message: str = ''
+    salvage_text_finalized: str = ''
+    salvage_text_partial: str = ''
+    needs_manual_retry: bool = False
+    retry_task_ref: str = ''

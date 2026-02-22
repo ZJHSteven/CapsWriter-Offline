@@ -55,7 +55,8 @@ class DiaryWriter:
         self,
         text: str,
         time_start: float,
-        file_audio: Optional[Path] = None
+        file_audio: Optional[Path] = None,
+        retention_days: Optional[int] = None,
     ) -> List[Path]:
         """
         写入日记
@@ -64,6 +65,7 @@ class DiaryWriter:
             text: 识别文本
             time_start: 录音开始时间戳
             file_audio: 音频文件路径（可选）
+            retention_days: 保留天数（可选）。传入后会在写入前做一次轻量清理。
             
         Returns:
             写入的日记文件路径列表
@@ -76,6 +78,10 @@ class DiaryWriter:
         
         folder_path = self.base_path / time_year / time_month
         makedirs(folder_path, exist_ok=True)
+
+        # 轻量清理：仅在调用者显式传入 retention_days 时启用，避免影响旧行为。
+        if retention_days is not None:
+            self._cleanup_old_markdown_files(retention_days)
         
         # 按日期归档
         file_md = folder_path / f'{time_day}.md'
@@ -111,3 +117,33 @@ class DiaryWriter:
         with open(file_md, 'w', encoding='utf-8') as f:
             f.write(HEADER_MD)
         logger.debug(f"创建日记文件: {file_md}")
+
+    def _cleanup_old_markdown_files(self, retention_days: int) -> None:
+        """
+        清理过期 Markdown 日记文件（按文件修改时间判断）。
+
+        说明：
+        - 这里只清理 `.md` 文件，不删除音频文件。
+        - 失败任务音频的清理由服务端失败任务存储与重试流程负责。
+        """
+        try:
+            days = int(retention_days)
+        except (TypeError, ValueError):
+            return
+        if days <= 0:
+            return
+
+        expire_before = time.time() - days * 86400
+        for md_file in self.base_path.rglob('*.md'):
+            try:
+                # 跳过非日记文件（例如项目文档），只清理 `YYYY/MM/DD.md` 这种结构。
+                rel_parts = md_file.relative_to(self.base_path).parts
+                if len(rel_parts) != 3:
+                    continue
+                if len(rel_parts[0]) != 4 or len(rel_parts[1]) != 2:
+                    continue
+                if md_file.stat().st_mtime < expire_before:
+                    md_file.unlink()
+                    logger.info(f"清理过期文字备份: {md_file}")
+            except Exception as e:
+                logger.warning(f"清理过期文字备份失败: {md_file}, {e}")

@@ -42,6 +42,14 @@ async def ws_send():
                 'tokens': result.tokens,
                 'timestamps': result.timestamps,
                 'is_final': result.is_final,
+                # 下面这些字段用于“失败保底 / 手动重试”链路，旧客户端忽略也不会报错
+                'status': getattr(result, 'status', 'success_confirmed'),
+                'error_code': getattr(result, 'error_code', ''),
+                'error_message': getattr(result, 'error_message', ''),
+                'salvage_text_finalized': getattr(result, 'salvage_text_finalized', ''),
+                'salvage_text_partial': getattr(result, 'salvage_text_partial', ''),
+                'needs_manual_retry': bool(getattr(result, 'needs_manual_retry', False)),
+                'retry_task_ref': getattr(result, 'retry_task_ref', ''),
             }
 
             # 获得 socket
@@ -59,8 +67,23 @@ async def ws_send():
             logger.debug(f"发送识别结果，任务ID: {result.task_id}, 文本长度: {len(result.text)}")
 
             if result.source == 'mic':
-                console.print(f'识别结果：\n    [green]{result.text}')
-                logger.info(f"麦克风识别结果: {result.text}")
+                status = getattr(result, 'status', 'success_confirmed')
+                if status == 'success_confirmed':
+                    console.print(f'识别结果：\n    [green]{result.text}')
+                    logger.info(f"麦克风识别结果: {result.text}")
+                else:
+                    failure_status = getattr(result, 'status', 'unknown')
+                    failure_error = getattr(result, 'error_code', '')
+                    # 失败保底结果不自动上屏，但在服务端终端明确打印出来，方便人工复制。
+                    console.print(
+                        f'    [yellow]失败保底状态：{failure_status} error={failure_error}'
+                    )
+                    if result.salvage_text_finalized:
+                        console.print(f'    [cyan]已定稿保底：{result.salvage_text_finalized}')
+                    if result.salvage_text_partial:
+                        console.print(f'    [yellow]未定稿保底：{result.salvage_text_partial}')
+                    if result.retry_task_ref:
+                        console.print(f'    [yellow]失败任务引用：{result.retry_task_ref}')
             elif result.source == 'file':
                 console.print(f'    转录进度：{result.duration:.2f}s', end='\r')
                 logger.debug(f"文件转录进度: {result.duration:.2f}s")
