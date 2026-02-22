@@ -29,10 +29,12 @@
   - `PLANS.md` 已追加本次 Skill 沉淀任务执行进度，便于后续继续迭代。
   - 已将 Skill 同步到全局目录：`C:\Users\ZJHSteven\.codex\skills\aliyun-bailian-funasr`，可在后续项目直接复用。
 - 正在做：联调“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路。
+- 正在做：联调“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路，并优化时延指标口径（偏向体感）。
 - 下一步：
   - 用真实语音流验证句子状态机在连续说话场景下无“覆盖前文/重复叠加”问题。
   - 评估是否需要把客户端发送节奏也统一为固定 100ms（当前已在服务端做 100ms 传输分帧）。
   - 补充 readme 的“实时链路状态机”说明与调参建议。
+  - 观察新“尾包时延”指标（抬键 -> 开始上屏）与“总耗时”在短句场景下的差异，确认体验改进效果。
   - 用新 Skill 在独立示例项目复用一次，验证可迁移性与文档完备性。
 
 ## 关键决策与理由（防止“吃书”）
@@ -62,5 +64,7 @@
   - 复现：`model_type=aliyun_realtime`，但 `server_init_recognizer.py` 顶层仍导入 `util.fun_asr_gguf`。
 - 坑4：把 `result-generated` 当“追加文本”而不是“同句覆盖更新”，会出现 A + A' + B 的重复拼接问题。
   - 复现：连续说话时对每条 `result-generated` 直接 `total += text`，最终文本会重复堆叠。
+- 坑5：控制台“转录时延”若使用 `time_complete - time_submit`，会包含用户说话过程，容易被误解为“尾包等待时延”。
+  - 复现：连续说话 10 秒后松键，显示时延常大于录音时长或接近总会话耗时。
 - 坑5：在 Windows + uv 管理 Python 环境下直接运行 Skill 校验脚本，可能出现 `yaml` 缺失或默认 GBK 解码失败。
   - 复现：直接执行 `python quick_validate.py`，未用 `uv run --with pyyaml` 且未设置 `PYTHONUTF8=1`。

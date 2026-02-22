@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import TYPE_CHECKING, Optional
 
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
@@ -223,14 +224,16 @@ class ResultProcessor:
         # 使用 text 字段（简单拼接结果，用于语音输入）
         text = message['text']
         original_text = text  # 保存原始识别结果
-        delay = message['time_complete'] - message['time_submit']
+        # 历史口径：从服务端“开始识别该任务”到服务端结果完成的总耗时。
+        # 对实时长录音来说，这个值会天然包含说话过程，因此常常大于录音时长。
+        total_cost = message['time_complete'] - message['time_submit']
 
         if message['is_final']:
-            logger.info(f"收到最终识别结果: {text}, 时延: {delay:.2f}s")
+            logger.info(f"收到最终识别结果: {text}, 总耗时: {total_cost:.2f}s")
         else:
             logger.debug(
                 f"接收到识别结果，文本: {text[:50]}{'...' if len(text) > 50 else ''}, "
-                f"时延: {delay:.2f}s"
+                f"总耗时: {total_cost:.2f}s"
             )
 
         # 如果非最终结果，继续等待
@@ -262,8 +265,27 @@ class ResultProcessor:
 
         logger.debug(f"热词替换后: {text[:50]}{'...' if len(text) > 50 else ''}")
 
-        # 控制台输出
-        console.print(f'    转录时延：{delay:.2f}s')
+        # 计算更贴近体感的“尾包时延”：
+        # 从用户抬键（发送最终包）到客户端开始执行输出前的耗时。
+        release_time = self.state.pop_task_release_time(message['task_id'])
+        # release_time 来自客户端录音线程的 wall-clock（time.time），这里用同一口径。
+        output_start_wall = time.time()
+        tail_latency = None
+        if release_time is not None:
+            tail_latency = max(0.0, output_start_wall - release_time)
+
+        # 控制台输出：显示新口径（尾包时延），同时保留总耗时便于排查。
+        if tail_latency is not None:
+            console.print(f'    尾包时延：{tail_latency:.2f}s')
+        else:
+            console.print('    尾包时延：N/A')
+        console.print(f'    总耗时：{total_cost:.2f}s')
+        logger.info(
+            "计时指标: task_id=%s, tail_latency=%s, total_cost=%.2fs",
+            message['task_id'],
+            f"{tail_latency:.2f}s" if tail_latency is not None else "N/A",
+            total_cost,
+        )
 
         # 先显示原始识别结果
         original_text_stripped = TextOutput.strip_punc(original_text)
@@ -306,7 +328,7 @@ class ResultProcessor:
                 paste = True
                 logger.debug(f"检测到兼容性应用: {window_title}，使用粘贴模式")
 
-        # LLM 处理和输出
+        # LLM 处理和输出（如果启用）
         llm_result = None
         if Config.llm_enabled:
             from util.llm.llm_process_text import llm_process_text

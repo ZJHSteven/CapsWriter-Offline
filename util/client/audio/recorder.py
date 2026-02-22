@@ -167,6 +167,11 @@ class AudioRecorder:
                     console.print(f'任务标识：{self.task_id}')
                     console.print(f'    录音时长：{self._duration:.2f}s')
                     logger.info(f"录音任务完成，任务ID: {self.task_id}, 时长: {self._duration:.2f}s")
+
+                    # 记录“抬键时刻”（本地时间），供结果侧计算尾包时延：
+                    # 抬键 -> 开始上屏文字。
+                    if self.task_id:
+                        self.state.register_task_release_time(self.task_id, float(task['time']))
                     
                     # 告诉服务端音频片段结束了
                     message = {

@@ -71,6 +71,9 @@ class ClientState:
     recording: bool = False
     recording_start_time: float = 0.0
     audio_files: Dict[str, Path] = field(default_factory=dict)
+    # 记录“抬键/发送最终包”的本地时间（按 task_id 索引）
+    # 用于计算更贴近体感的“尾包时延”（抬键 -> 开始上屏）
+    task_release_times: Dict[str, float] = field(default_factory=dict)
 
     # 最近一次识别结果（用于手动添加纠错记录）
     last_recognition_text: Optional[str] = None
@@ -119,6 +122,7 @@ class ClientState:
         self.recording = False
         self.recording_start_time = 0.0
         self.audio_files.clear()
+        self.task_release_times.clear()
         
         logger.debug("客户端状态重置完成")
     
@@ -207,6 +211,32 @@ class ClientState:
                         logger.debug(f"UDP 发送输出文本到 {addr}:{port}, 长度: {len(text)}")
                 except Exception as e:
                     logger.warning(f"UDP 发送输出文本到 {addr}:{port} 失败: {e}")
+
+    def register_task_release_time(self, task_id: str, release_time: float) -> None:
+        """
+        记录某个录音任务的“抬键时间”。
+
+        Args:
+            task_id: 任务ID
+            release_time: 用户松开快捷键（本地）时间戳
+        """
+        self.task_release_times[task_id] = release_time
+        logger.debug(f"记录抬键时间: task_id={task_id}, t={release_time:.3f}")
+
+    def pop_task_release_time(self, task_id: str) -> Optional[float]:
+        """
+        获取并删除某个录音任务的抬键时间。
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            抬键时间戳；若不存在则返回 None
+        """
+        value = self.task_release_times.pop(task_id, None)
+        if value is not None:
+            logger.debug(f"获取抬键时间: task_id={task_id}, t={value:.3f}")
+        return value
 
 
 # 全局状态实例
