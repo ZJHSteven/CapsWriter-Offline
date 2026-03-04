@@ -127,10 +127,21 @@ class ClientConfig:
     file_rest_vocabulary_id = ''       # 可选热词词表 ID
 
     # 本地文件上传到可访问 URL 的方式（录音文件 REST 只接受 URL，不接受本地路径/base64）
+    # - 'dashscope_temp_oss': 使用阿里百炼官方临时 OSS（getPolicy -> 表单上传 -> oss://key）
     # - 'presigned_put': 先调用临时签名接口拿 upload_url，再 PUT 上传
     # - 'custom_api':    调用你自己的上传 API（multipart/form-data）
     # - 'none':          不自动上传（会直接报错提示你先配置）
     file_upload_mode = 'none'
+
+    # dashscope_temp_oss 模式配置（官方临时 OSS 上传链路）
+    # 说明：
+    # 1) 该链路由百炼平台提供临时存储，不是你自建 OSS；
+    # 2) 上传完成后得到 oss://key，可直接喂给录音文件 REST 接口；
+    # 3) 临时链路更适合开发/中低并发，生产高并发建议使用自建对象存储。
+    file_upload_dashscope_policy_url = 'https://dashscope.aliyuncs.com/api/v1/uploads'
+    file_upload_dashscope_model = 'fun-asr'
+    file_upload_dashscope_policy_timeout = 30.0
+    file_upload_dashscope_form_timeout = 600.0
 
     # presigned_put 模式配置（建议用于 OSS 临时签名上传）
     file_upload_presign_api = ''       # 例如: https://your-service/api/presign
