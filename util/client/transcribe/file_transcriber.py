@@ -84,6 +84,14 @@ class FileTranscriber:
 
         # 提前检查上传模式配置，避免运行到中途才报错。
         upload_mode = (Config.file_upload_mode or 'none').lower()
+        supported_upload_modes = {'dashscope_temp_oss', 'presigned_put', 'custom_api', 'none'}
+        if upload_mode not in supported_upload_modes:
+            console.print(f'\n[bold red]错误：不支持的 file_upload_mode={upload_mode}[/bold red]')
+            console.print(
+                "    支持的模式：dashscope_temp_oss / presigned_put / custom_api / none"
+            )
+            logger.error(f"不支持的 file_upload_mode: {upload_mode}")
+            return False
         if upload_mode == 'presigned_put' and not Config.file_upload_presign_api:
             console.print('\n[bold red]错误：file_upload_mode=presigned_put 但未配置 file_upload_presign_api[/bold red]')
             logger.error("缺少 file_upload_presign_api")
@@ -94,7 +102,7 @@ class FileTranscriber:
             return False
         if upload_mode == 'none':
             console.print('\n[bold red]错误：file_upload_mode=none，未配置本地文件上传通道[/bold red]')
-            console.print('    请在 config.py 中设置 presigned_put 或 custom_api。')
+            console.print('    请在 config.py 中设置 dashscope_temp_oss / presigned_put / custom_api。')
             logger.error("file_upload_mode=none")
             return False
 
@@ -136,6 +144,11 @@ class FileTranscriber:
     def _build_upload_resolver(self) -> FileUploadResolver:
         return FileUploadResolver(
             mode=Config.file_upload_mode,
+            api_key=Config.file_rest_api_key,
+            dashscope_policy_url=Config.file_upload_dashscope_policy_url,
+            dashscope_model=Config.file_upload_dashscope_model,
+            dashscope_policy_timeout=Config.file_upload_dashscope_policy_timeout,
+            dashscope_form_timeout=Config.file_upload_dashscope_form_timeout,
             presign_api=Config.file_upload_presign_api,
             presign_timeout=Config.file_upload_presign_timeout,
             put_timeout=Config.file_upload_put_timeout,
