@@ -133,9 +133,9 @@ class FileUploadResolver:
             raise RuntimeError(f"百炼上传凭证缺少 upload_host，响应={policy_body}")
         if not upload_dir:
             raise RuntimeError(f"百炼上传凭证缺少 upload_dir，响应={policy_body}")
-        if not policy or not signature or not oss_access_key_id or not security_token:
+        if not policy or not signature or not oss_access_key_id:
             raise RuntimeError(
-                "百炼上传凭证缺少关键字段（policy/signature/oss_access_key_id/x_oss_security_token），"
+                "百炼上传凭证缺少关键字段（policy/signature/oss_access_key_id），"
                 f"响应={policy_body}"
             )
 
@@ -150,10 +150,25 @@ class FileUploadResolver:
             "policy": policy,
             "OSSAccessKeyId": oss_access_key_id,
             "Signature": signature,
-            "x-oss-security-token": security_token,
             # 让上传接口尽量返回 200，便于统一处理响应状态。
             "success_action_status": "200",
         }
+        # 注意：
+        # - 有些账号返回长期 AK，不会带 `x_oss_security_token`；
+        # - 也有一些策略会附带 `x_oss_object_acl`、`x_oss_forbid_overwrite` 等条件字段；
+        # 因此这里采用“自动透传 x_oss_*”策略，最大化兼容官方返回。
+        if security_token:
+            form_fields["x-oss-security-token"] = security_token
+        for key, value in policy_data.items():
+            if not isinstance(key, str):
+                continue
+            if not key.startswith("x_oss_"):
+                continue
+            if value is None:
+                continue
+            oss_form_key = key.replace("x_oss_", "x-oss-").replace("_", "-")
+            if oss_form_key not in form_fields:
+                form_fields[oss_form_key] = str(value)
 
         logger.info("开始上传文件到百炼临时 OSS: host=%s key=%s", upload_host, object_key)
         with open(file_path, "rb") as fp:
