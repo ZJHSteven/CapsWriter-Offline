@@ -6,9 +6,10 @@
 百炼录音文件 REST 接口只接受 file_urls，因此本地文件需要先上传到可访问地址。
 
 支持三种模式：
-1) none:          不上传，直接报错提示配置。
-2) presigned_put: 调用临时签名 API 获取 upload_url + file_url，再 PUT 上传。
-3) custom_api:    调用自定义上传接口（multipart/form-data），接口返回公网 URL。
+1) dashscope_temp_oss: 使用百炼官方临时 OSS 上传，返回 `oss://key`。
+2) presigned_put:      调用临时签名 API 获取 upload_url + file_url，再 PUT 上传。
+3) custom_api:         调用自定义上传接口（multipart/form-data），接口返回公网 URL。
+4) none:               不上传，直接报错提示配置。
 """
 
 from __future__ import annotations
