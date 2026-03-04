@@ -13,6 +13,15 @@
   - 修复服务端启动导入错误：`aliyun_realtime` 模式下改为按需导入 `create_asr_engine`，避免触发 `util.fun_asr_gguf` 循环导入。
   - 新增独立文件转写 REST 客户端：`util/client/transcribe/dashscope_rest_client.py`。
   - 新增本地文件上传 URL 解析器：`util/client/transcribe/file_upload_resolver.py`（支持 `presigned_put` 与 `custom_api`）。
+  - 文件上传新增官方临时 OSS 模式：`dashscope_temp_oss`（`getPolicy -> 表单上传 -> oss://key`）。
+  - 文件上传默认模式已切换为 `dashscope_temp_oss`，减少开箱配置成本。
+  - 文件 REST 提交已支持 `oss://` 自动附加 `X-DashScope-OssResourceResolve: enable`。
+  - 文件 REST 结果解析已兼容 `transcription_url` 二次下载，不再强依赖内联 `transcripts`。
+  - 已完成真实端到端联调（2026-03-04）：
+    - 使用本地测试文件走官方 `https://dashscope.aliyuncs.com/api/v1/uploads?action=getPolicy&model=fun-asr`
+    - 成功上传并生成临时 `oss://` 地址
+    - 成功提交并轮询至 `task_status=SUCCEEDED`
+    - 成功解析文本结果（样例输出：`第一。`）
   - `util/client/transcribe/file_transcriber.py` 已重构为独立 REST 通道，不再依赖本地实时服务端 WebSocket。
   - `config.py` 已新增文件 REST 与上传通道配置项。
   - 新增实时链路重构执行计划（`PLANS.md`）：明确“单次会话直连云端 + 句子状态机定稿”的改造方向。
@@ -48,7 +57,6 @@
   - 新增手动重试脚本入口：
     - `retry_failed_tasks.py`（终端交互列出/选择/重试）
     - `retry_failed_tasks.bat`（Windows 双击入口）
-- 正在做：联调“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路。
 - 正在做：联调“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路，并验证失败保底/自动重试路径。
 - 下一步：
   - 用真实语音流验证句子状态机在连续说话场景下无“覆盖前文/重复叠加”问题。
@@ -69,8 +77,8 @@
   - 原因：在不大改客户端流程的前提下，先降低文件任务对实时听写的阻塞影响。
 - 决策E：最终文件转写必须独立于实时识别服务端，直接走 REST 异步。
   - 原因：彻底解耦后端资源占用，避免文件任务影响日常麦克风实时听写。
-- 决策F：上传层采用“临时签名上传 + 自定义上传 API”双模式。
-  - 原因：避免硬编码单一 OSS SDK，兼容不同对象存储与企业内网网关方案。
+- 决策F：上传层采用“三模式并存”：官方临时 OSS / 临时签名上传 / 自定义上传 API。
+  - 原因：官方临时 OSS 适合开箱联调；预签名与自定义 API 适合已有对象存储体系或企业网关。
 - 决策G：实时链路改为“单会话直连云端 + 句子状态机定稿”，不再依赖本地 60 秒工程分段与文本拼接。
   - 原因：`result-generated` 是句子快照更新，不是稳定增量；本地分段拼接会放大覆盖/重复风险。
 - 决策H：将 Fun-ASR 协议知识沉淀为独立 Skill（含参考规范文件）。
@@ -95,3 +103,5 @@
   - 复现：直接执行 `python quick_validate.py`，未用 `uv run --with pyyaml` 且未设置 `PYTHONUTF8=1`。
 - 坑7：云端实时长任务若只依赖 `task-finished` 才返回结果，`finish` 确认超时会导致前面所有已定稿句全部丢失。
   - 复现：长按说话 >120 秒，最后阶段网络抖动，服务端等待 `task-finished` 超时。
+- 坑8：文件 REST 任务即使 `SUCCEEDED`，也可能只返回 `transcription_url`，不一定内联 `transcripts`。
+  - 复现：提交 `oss://` 音频后查询任务结果，`output.results[0]` 仅包含 `transcription_url`。
