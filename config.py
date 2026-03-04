@@ -131,7 +131,7 @@ class ClientConfig:
     # - 'presigned_put': 先调用临时签名接口拿 upload_url，再 PUT 上传
     # - 'custom_api':    调用你自己的上传 API（multipart/form-data）
     # - 'none':          不自动上传（会直接报错提示你先配置）
-    file_upload_mode = 'none'
+    file_upload_mode = 'dashscope_temp_oss'
 
     # dashscope_temp_oss 模式配置（官方临时 OSS 上传链路）
     # 说明：
