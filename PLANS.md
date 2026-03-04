@@ -157,3 +157,43 @@
 ### 当前约束（明确说明）
 - 当前仍是识别子进程串行调度；即使单任务失败不再崩，`final` 任务等待期间仍可能阻塞后续任务（并发化待 Phase 2）。
 - 自动重试为“整段 PCM 重放到新云端会话”，不是续传原会话。
+
+## ExecPlan（2026-03-04：官方临时 OSS 上传链路补齐与联调）
+
+### 目标
+- 补齐阿里百炼“官方临时 OSS 上传”能力：`getPolicy -> OSS 表单上传 -> oss://key`。
+- 当文件 URL 为 `oss://` 时，调用 REST 识别自动带上 `X-DashScope-OssResourceResolve: enable`。
+- 使用真实本地测试文件走完整链路，验证官方地址可访问、提交流程可跑通。
+
+### 改造范围
+1. `config.py`
+- 新增官方临时 OSS 上传模式配置项（模式名、凭证地址、模型参数、超时）。
+
+2. `util/client/transcribe/file_upload_resolver.py`
+- 新增 `dashscope_temp_oss` 上传模式：
+  - 调用 `GET /api/v1/uploads?action=getPolicy&model=...`
+  - 解析凭证字段并执行 multipart/form-data 上传
+  - 返回 `oss://{key}` 临时地址
+- 补齐关键日志与错误信息，便于排障。
+
+3. `util/client/transcribe/file_transcriber.py`
+- 创建上传解析器时注入 DashScope API Key 与官方上传配置。
+
+4. `util/client/transcribe/dashscope_rest_client.py`
+- 提交任务前自动判断 `file_url` 是否为 `oss://`。
+- 若是 `oss://`，自动附加 `X-DashScope-OssResourceResolve: enable` 请求头。
+
+### 验证步骤
+1. 语法检查：`python -m py_compile` 覆盖修改文件。
+2. 功能联调（真实文件）：
+- 准备一个本地测试音频文件。
+- 走 `dashscope_temp_oss` 模式上传并拿到 `oss://`。
+- 提交 REST 异步任务并轮询状态。
+3. 结果判定：
+- 若返回 `task_id` 且状态进入 `PENDING/RUNNING/SUCCEEDED`，视为路径跑通。
+- 记录失败信息（鉴权/网络/配额）并给出可复现日志。
+
+### 执行进度（2026-03-04）
+- [ ] 已完成配置项与上传模式代码改造。
+- [ ] 已完成 `oss://` 提交头自动适配。
+- [ ] 已完成真实文件端到端测试。
