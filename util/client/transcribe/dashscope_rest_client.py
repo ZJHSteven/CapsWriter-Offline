@@ -67,12 +67,24 @@ class DashScopeAsrRestClient:
         self.channel_id = channel_id or [0]
         self.vocabulary_id = vocabulary_id
 
-    def _headers(self) -> Dict[str, str]:
-        return {
+    def _build_submit_headers(self, file_url: str) -> Dict[str, str]:
+        """
+        构建“提交转写任务”请求头。
+
+        关键点：
+        - 常规 URL（http/https）只需异步头 `X-DashScope-Async`；
+        - 临时 OSS URL（`oss://`）必须额外添加
+          `X-DashScope-OssResourceResolve: enable`，
+          否则百炼服务端不会去解析 `oss://` 资源。
+        """
+        headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "X-DashScope-Async": "enable",
         }
+        if self._is_oss_url(file_url):
+            headers["X-DashScope-OssResourceResolve"] = "enable"
+        return headers
 
     async def submit_task(self, file_url: str) -> str:
         """
@@ -92,7 +104,7 @@ class DashScopeAsrRestClient:
         response = await asyncio.to_thread(
             requests.post,
             self.submit_url,
-            headers=self._headers(),
+            headers=self._build_submit_headers(file_url),
             json=payload,
             timeout=60,
         )
@@ -225,3 +237,10 @@ class DashScopeAsrRestClient:
         except Exception:
             detail = response.text
         raise RuntimeError(f"{prefix}，HTTP={response.status_code}，响应={detail}")
+
+    @staticmethod
+    def _is_oss_url(file_url: str) -> bool:
+        """
+        判断是否为百炼临时 OSS 地址。
+        """
+        return str(file_url or "").strip().lower().startswith("oss://")
