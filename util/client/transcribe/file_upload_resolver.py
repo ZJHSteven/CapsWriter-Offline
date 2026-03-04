@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import uuid
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -33,6 +34,11 @@ class FileUploadResolver:
     def __init__(
         self,
         mode: str,
+        api_key: str,
+        dashscope_policy_url: str,
+        dashscope_model: str,
+        dashscope_policy_timeout: float,
+        dashscope_form_timeout: float,
         presign_api: str,
         presign_timeout: float,
         put_timeout: float,
@@ -41,6 +47,11 @@ class FileUploadResolver:
         upload_result_key: str,
     ) -> None:
         self.mode = (mode or 'none').lower()
+        self.api_key = api_key or ''
+        self.dashscope_policy_url = (dashscope_policy_url or '').strip()
+        self.dashscope_model = (dashscope_model or 'fun-asr').strip()
+        self.dashscope_policy_timeout = float(dashscope_policy_timeout)
+        self.dashscope_form_timeout = float(dashscope_form_timeout)
         self.presign_api = presign_api
         self.presign_timeout = float(presign_timeout)
         self.put_timeout = float(put_timeout)
@@ -55,13 +66,114 @@ class FileUploadResolver:
         if self.mode == 'none':
             raise RuntimeError(
                 "file_upload_mode=none，当前未配置上传通道。"
-                "请配置 presigned_put 或 custom_api。"
+                "请配置 dashscope_temp_oss / presigned_put / custom_api。"
             )
+        if self.mode == 'dashscope_temp_oss':
+            return await self._resolve_by_dashscope_temp_oss(file_path)
         if self.mode == 'presigned_put':
             return await self._resolve_by_presigned_put(file_path)
         if self.mode == 'custom_api':
             return await self._resolve_by_custom_api(file_path)
         raise RuntimeError(f"不支持的 file_upload_mode: {self.mode}")
+
+    async def _resolve_by_dashscope_temp_oss(self, file_path: Path) -> str:
+        """
+        使用阿里百炼官方临时 OSS 上传本地文件，并返回 `oss://` 地址。
+
+        核心流程（与官方文档一致）：
+        1. `GET /api/v1/uploads?action=getPolicy&model=...` 获取上传凭证；
+        2. 向 `upload_host` 发 multipart/form-data 上传；
+        3. 组装 `oss://{key}`，供后续录音文件 REST 接口使用。
+        """
+        if not self.api_key:
+            raise RuntimeError(
+                "file_upload_mode=dashscope_temp_oss 但未配置 DASHSCOPE_API_KEY（file_rest_api_key 为空）"
+            )
+
+        policy_url = self.dashscope_policy_url or "https://dashscope.aliyuncs.com/api/v1/uploads"
+        policy_model = self.dashscope_model or "fun-asr"
+        policy_headers = {
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        logger.info("请求百炼临时 OSS 上传凭证: url=%s model=%s", policy_url, policy_model)
+        policy_resp = await asyncio.to_thread(
+            requests.get,
+            policy_url,
+            params={"action": "getPolicy", "model": policy_model},
+            headers=policy_headers,
+            timeout=self.dashscope_policy_timeout,
+        )
+        self._raise_for_http_error(policy_resp, "获取百炼临时 OSS 上传凭证失败")
+
+        policy_body = policy_resp.json()
+        policy_data = policy_body.get("data", policy_body) if isinstance(policy_body, dict) else {}
+        if not isinstance(policy_data, dict):
+            raise RuntimeError(f"百炼上传凭证响应格式异常，响应={policy_body}")
+
+        # 兼容不同命名风格（下划线/驼峰），避免字段风格变化导致直接崩溃。
+        upload_host = str(policy_data.get("upload_host") or policy_data.get("uploadHost") or "").strip()
+        upload_dir = str(policy_data.get("upload_dir") or policy_data.get("uploadDir") or "").strip()
+        policy = str(policy_data.get("policy") or "").strip()
+        signature = str(policy_data.get("signature") or "").strip()
+        oss_access_key_id = str(
+            policy_data.get("oss_access_key_id")
+            or policy_data.get("ossAccessKeyId")
+            or policy_data.get("OSSAccessKeyId")
+            or ""
+        ).strip()
+        security_token = str(
+            policy_data.get("x_oss_security_token")
+            or policy_data.get("x-oss-security-token")
+            or policy_data.get("xOssSecurityToken")
+            or ""
+        ).strip()
+
+        if not upload_host:
+            raise RuntimeError(f"百炼上传凭证缺少 upload_host，响应={policy_body}")
+        if not upload_dir:
+            raise RuntimeError(f"百炼上传凭证缺少 upload_dir，响应={policy_body}")
+        if not policy or not signature or not oss_access_key_id or not security_token:
+            raise RuntimeError(
+                "百炼上传凭证缺少关键字段（policy/signature/oss_access_key_id/x_oss_security_token），"
+                f"响应={policy_body}"
+            )
+
+        if not upload_host.startswith(("http://", "https://")):
+            upload_host = f"https://{upload_host.lstrip('/')}"
+
+        object_key = self._build_dashscope_object_key(upload_dir, file_path.name)
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        form_fields = {
+            # key 是 OSS 对象路径，最终 `oss://` 也是基于它来组装。
+            "key": object_key,
+            "policy": policy,
+            "OSSAccessKeyId": oss_access_key_id,
+            "Signature": signature,
+            "x-oss-security-token": security_token,
+            # 让上传接口尽量返回 200，便于统一处理响应状态。
+            "success_action_status": "200",
+        }
+
+        logger.info("开始上传文件到百炼临时 OSS: host=%s key=%s", upload_host, object_key)
+        with open(file_path, "rb") as fp:
+            files = {"file": (file_path.name, fp, content_type)}
+            upload_resp = await asyncio.to_thread(
+                requests.post,
+                upload_host,
+                data=form_fields,
+                files=files,
+                timeout=self.dashscope_form_timeout,
+            )
+
+        if upload_resp.status_code not in (200, 201, 204):
+            raise RuntimeError(
+                f"百炼临时 OSS 上传失败，HTTP={upload_resp.status_code}，响应={upload_resp.text}"
+            )
+
+        oss_url = f"oss://{object_key}"
+        logger.info("百炼临时 OSS 上传完成: %s", oss_url)
+        return oss_url
 
     async def _resolve_by_presigned_put(self, file_path: Path) -> str:
         """
@@ -156,3 +268,19 @@ class FileUploadResolver:
         except Exception:
             detail = response.text
         raise RuntimeError(f"{prefix}，HTTP={response.status_code}，响应={detail}")
+
+    @staticmethod
+    def _build_dashscope_object_key(upload_dir: str, filename: str) -> str:
+        """
+        生成上传对象 key。
+
+        设计取舍：
+        - 保留官方给的 `upload_dir` 作为前缀，避免权限范围越界；
+        - 文件名追加 UUID 前缀，减少并发上传重名冲突；
+        - 最终 key 不以 `/` 开头，便于 `oss://{key}` 直接拼接。
+        """
+        clean_dir = upload_dir.strip().strip("/")
+        unique_name = f"{uuid.uuid4().hex}_{filename}"
+        if not clean_dir:
+            return unique_name
+        return f"{clean_dir}/{unique_name}"
