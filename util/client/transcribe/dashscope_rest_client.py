@@ -164,7 +164,7 @@ class DashScopeAsrRestClient:
             raise RuntimeError(f"任务结果缺少 output.results: {task_output}")
 
         first = results[0]
-        transcripts = first.get("transcripts", [])
+        transcripts = self._extract_transcripts(first)
         if not transcripts:
             raise RuntimeError(f"任务结果缺少 transcripts: {task_output}")
 
@@ -227,6 +227,36 @@ class DashScopeAsrRestClient:
             timestamps=timestamps,
             duration_seconds=duration_seconds,
         )
+
+    def _extract_transcripts(self, result_item: Dict) -> List[Dict]:
+        """
+        从任务结果中提取 transcripts。
+
+        兼容两种返回形态：
+        1. 直接内联 `results[].transcripts`；
+        2. 只返回 `results[].transcription_url`，需要二次下载结果 JSON。
+        """
+        inline_transcripts = result_item.get("transcripts", [])
+        if isinstance(inline_transcripts, list) and inline_transcripts:
+            return [item for item in inline_transcripts if isinstance(item, dict)]
+
+        transcription_url = str(result_item.get("transcription_url") or "").strip()
+        if not transcription_url:
+            return []
+
+        logger.info("检测到 transcription_url，开始下载转写明细")
+        resp = requests.get(transcription_url, timeout=60)
+        self._raise_for_http_error(resp, "下载 transcription_url 失败")
+
+        payload = resp.json()
+        payload_data = payload.get("data", payload) if isinstance(payload, dict) else {}
+        if not isinstance(payload_data, dict):
+            return []
+
+        url_transcripts = payload_data.get("transcripts", [])
+        if not isinstance(url_transcripts, list):
+            return []
+        return [item for item in url_transcripts if isinstance(item, dict)]
 
     @staticmethod
     def _raise_for_http_error(response: requests.Response, prefix: str) -> None:
