@@ -1,7 +1,7 @@
 # 项目状态快照
 
 ## 当前结论（必须最新）
-- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并完成“实时链路止血版稳健性改造（失败保底 + 失败任务落盘 + 手动重试入口）”；已补充“当前实际使用链路 -> Rust/Tauri 重构”技术报告，开始收敛新项目边界。
+- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并完成“实时链路止血版稳健性改造（失败保底 + 失败任务落盘 + 手动重试入口）”；这次又把 `retry_failed_tasks.py` 的导入链瘦身并完成实测重试，已补充“当前实际使用链路 -> Rust/Tauri 重构”技术报告，开始收敛新项目边界。
 - 已完成：
   - 已核对官方文档与 Context7 来源，可支撑本次改造。
   - 已完成本地快照基线提交并推送到 fork 分支。
@@ -57,6 +57,8 @@
   - 新增手动重试脚本入口：
     - `retry_failed_tasks.py`（终端交互列出/选择/重试）
     - `retry_failed_tasks.bat`（Windows 双击入口）
+  - `retry_failed_tasks.py` 已在任务 `1a8f510f-3ec6-11f1-87c5-e8bfb8f608a0` 上实测重放成功，`meta.json` 已更新为 `replayed_success`
+  - `util.client.__init__.py` 已改为懒加载，避免手动重试脚本一导入就把客户端音频/UI 依赖全部拉起来
   - 已新增重构盘点文档：`docs/rust_tauri_rebuild_report.md`
     - 已梳理两条真实使用链路：实时输入、文件转写
     - 已确认文件转写已独立，不再依赖本地实时服务端 WebSocket
@@ -69,7 +71,7 @@
   - 评估是否需要把客户端发送节奏也统一为固定 100ms（当前已在服务端做 100ms 传输分帧）。
   - 补充 readme 的“实时链路状态机”说明与调参建议。
   - 观察新“尾包时延”指标（抬键 -> 开始上屏）与“总耗时”在短句场景下的差异，确认体验改进效果。
-  - 验证 `retry_failed_tasks.py` 在多失败任务并存时的交互体验，并视需要补充 `show/list/retry all` 参数模式。
+  - 验证 `retry_failed_tasks.py` 在多失败任务并存时的交互体验，并视需要补充 `show/list/retry all` 参数模式或直接按 `task_id` 选择。
   - 把 `docs/rust_tauri_rebuild_report.md` 进一步收敛成 Rust 核心模块接口草案（状态机、配置、命令、事件、错误模型）。
 
 ## 关键决策与理由（防止“吃书”）

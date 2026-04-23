@@ -180,6 +180,7 @@
   - [x] `retry_failed_tasks.py` 终端交互列出/选择/重试
   - [x] 重试成功写文字备份并标记成功
   - [x] `retry_failed_tasks.bat` Windows 启动入口
+  - [x] 手动重试入口瘦身：`util.client` 改为懒加载，`retry_failed_tasks.bat` 改为 `uv run` 启动，裸 `python` 会给出明确缺依赖提示
 - Phase 4（备份策略完善）：部分完成
   - [x] 文字备份与音频备份解耦
   - [x] 文字备份按保留天数清理（默认 30 天）

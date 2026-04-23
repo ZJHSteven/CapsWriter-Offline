@@ -12,7 +12,6 @@ from os import makedirs
 from pathlib import Path
 from typing import Optional, List
 
-from util.client.state import console
 from util.logger import get_logger
 
 # 日志记录器

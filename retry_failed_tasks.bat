@@ -1,5 +1,5 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-python retry_failed_tasks.py
+uv run --with rich --with websockets --with numpy python retry_failed_tasks.py
 pause

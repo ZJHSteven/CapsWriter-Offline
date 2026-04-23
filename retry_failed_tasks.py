@@ -22,10 +22,18 @@ import sys
 import time
 from pathlib import Path
 
-from config import ServerConfig, ClientConfig
-from util.client.diary.diary_writer import DiaryWriter
-from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer
-from util.server.failed_task_store import FailedTaskStore
+try:
+    from config import ServerConfig, ClientConfig
+    from util.client.diary.diary_writer import DiaryWriter
+    from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer
+    from util.server.failed_task_store import FailedTaskStore
+except ModuleNotFoundError as e:
+    missing = getattr(e, 'name', 'unknown')
+    raise SystemExit(
+        f"运行 retry_failed_tasks.py 需要先准备依赖，当前缺少: {missing}。"
+        f"建议使用 `uv run --with rich --with websockets --with numpy python retry_failed_tasks.py`，"
+        f"或者先安装 requirements-client.txt / requirements-server.txt。"
+    ) from e
 
 
 def _build_recognizer() -> AliyunRealtimeRecognizer:
