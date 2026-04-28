@@ -1,7 +1,7 @@
 # 项目状态快照
 
 ## 当前结论（必须最新）
-- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并完成“实时链路止血版稳健性改造（失败保底 + 失败任务落盘 + 手动重试入口）”；这次又把 `retry_failed_tasks.py` 的导入链瘦身并完成实测重试，已补充“当前实际使用链路 -> Rust/Tauri 重构”技术报告，开始收敛新项目边界。
+- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并完成“实时链路止血版稳健性改造（失败保底 + 失败任务落盘 + 手动重试入口）”；这次又修复长音频失败重放的 `task-finished` 等待策略，避免云端仍在持续返回 `result-generated` 时被固定 120 秒超时误杀。
 - 已完成：
   - 已核对官方文档与 Context7 来源，可支撑本次改造。
   - 已完成本地快照基线提交并推送到 fork 分支。
@@ -58,6 +58,10 @@
     - `retry_failed_tasks.py`（终端交互列出/选择/重试）
     - `retry_failed_tasks.bat`（Windows 双击入口）
   - `retry_failed_tasks.py` 已在任务 `1a8f510f-3ec6-11f1-87c5-e8bfb8f608a0` 上实测重放成功，`meta.json` 已更新为 `replayed_success`
+  - 长音频重放等待策略已改为“云端有事件就续等、云端空闲超时才失败、按音频时长设置总上限”：
+    - 原问题任务 `542ac91f-42f9-11f1-9c9f-e8bfb8f608a0` 录音约 550 秒，原始实时链路中途 `keepalive ping timeout`，后续重放在固定 120 秒等待下被误判失败。
+    - 手动长等待验证已成功拿到 `success_confirmed`，说明音频本身可识别，主要问题是失败重放等待策略过短。
+    - 新增 `tests/test_aliyun_finish_wait.py` 覆盖 finish 等待续期、空闲超时和长音频总上限。
   - `util.client.__init__.py` 已改为懒加载，避免手动重试脚本一导入就把客户端音频/UI 依赖全部拉起来
   - 已新增重构盘点文档：`docs/rust_tauri_rebuild_report.md`
     - 已梳理两条真实使用链路：实时输入、文件转写
@@ -95,6 +99,8 @@
   - 原因：长任务最后一步超时/断网时，前面已转好的句子仍有保留价值，必须做保底恢复。
 - 决策J：失败任务重试基于“整次按下/抬起录音会话 PCM 文件”重放，而不是尝试续传原云端 WS 会话。
   - 原因：云端实时 WS 会话断线后通常不可续；整段重放实现简单且可靠。
+- 决策K：`finish_confirm_timeout` 作为“云端事件空闲超时”，不再作为固定总等待时间。
+  - 原因：失败后的整段 PCM 重放可能会持续返回 `result-generated`，只要云端仍在输出，就不应被固定秒数误杀；同时保留按音频时长放大的总上限，防止异常连接永久挂住。
 
 ## 常见坑 / 复现方法
 - 坑1：REST 文件识别不支持本地文件直传与 base64。
@@ -111,5 +117,7 @@
   - 复现：直接执行 `python quick_validate.py`，未用 `uv run --with pyyaml` 且未设置 `PYTHONUTF8=1`。
 - 坑7：云端实时长任务若只依赖 `task-finished` 才返回结果，`finish` 确认超时会导致前面所有已定稿句全部丢失。
   - 复现：长按说话 >120 秒，最后阶段网络抖动，服务端等待 `task-finished` 超时。
+- 坑9：失败后的整段 PCM 重放不是实时说话，云端可能需要持续处理并返回 `result-generated`，固定 120 秒总等待会误杀长音频。
+  - 复现：原始实时会话中途 `keepalive ping timeout`，自动/手动重试长音频时在 `finish_wait_s≈120s` 仍有 `result-generated`，但本地提前判定 `finish_confirm_timeout`。
 - 坑8：文件 REST 任务即使 `SUCCEEDED`，也可能只返回 `transcription_url`，不一定内联 `transcripts`。
   - 复现：提交 `oss://` 音频后查询任务结果，`output.results[0]` 仅包含 `transcription_url`。

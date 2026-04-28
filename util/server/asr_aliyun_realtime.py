@@ -233,6 +233,87 @@ class AliyunRealtimeRecognizer:
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return fut.result(timeout=timeout)
 
+    def _compute_finish_total_timeout(self, session: _SessionState) -> float:
+        """
+        计算 `finish-task` 后等待 `task-finished` 的“总上限”。
+
+        背景：
+        - `finish_confirm_timeout` 过去是一个固定等待值，例如 120 秒。
+        - 对实时会话来说，云端通常边说边处理，松键后只需要几秒即可收到 `task-finished`。
+        - 对失败后的整段 PCM 重放来说，本地会快速把几分钟音频发给云端，云端可能还在持续返回
+          `result-generated`，此时不能因为固定 120 秒到点就误判失败。
+
+        返回值含义：
+        - 这是兜底总上限，不是“空闲超时”。
+        - 只要云端持续有事件，真正的主要判断交给 `_wait_for_finish_confirmation` 的空闲超时。
+        - 总上限用于防止极端情况下连接一直有无意义事件、导致进程永久挂住。
+        """
+        idle_timeout = max(1.0, float(self.finish_confirm_timeout))
+        duration = max(0.0, float(session.duration or 0.0))
+        return max(
+            idle_timeout + 15.0,
+            float(self.response_timeout) * 4.0,
+            duration * 1.5 + idle_timeout,
+        )
+
+    def _compute_finish_coro_timeout(self, session: _SessionState) -> float:
+        """
+        计算外层 `Future.result(timeout=...)` 的等待上限。
+
+        这里要比协程内部总上限稍大一点：
+        - 协程内部负责产生结构化失败原因，并保留保底文本。
+        - 外层只负责防止后台协程真的失控，所以给 15 秒缓冲时间。
+        """
+        return self._compute_finish_total_timeout(session) + 15.0
+
+    async def _wait_for_finish_confirmation(self, session: _SessionState) -> None:
+        """
+        等待云端 `task-finished`，但把“空闲超时”和“总上限”分开处理。
+
+        核心规则：
+        1. 只要后台 reader 还在收到 `result-generated` / `heartbeat` / 其他 WS 事件，
+           `session.last_event_time` 就会更新，此时说明云端仍在工作，不应按固定 120 秒失败。
+        2. 如果从最后一个云端事件开始，连续 `finish_confirm_timeout` 秒都没有新事件，
+           才认为这次 finish 等待真的卡住。
+        3. 即使一直有事件，也保留一个与音频时长相关的总上限，避免极端情况下永久等待。
+        """
+        wait_started_at = time.time()
+        idle_timeout = max(1.0, float(self.finish_confirm_timeout))
+        total_timeout = self._compute_finish_total_timeout(session)
+
+        while not session.finished_event.is_set():
+            now = time.time()
+            elapsed_total = now - wait_started_at
+            last_event_time = float(session.last_event_time or session.finish_sent_time or wait_started_at)
+            idle_elapsed = now - max(last_event_time, session.finish_sent_time or wait_started_at)
+
+            if elapsed_total >= total_timeout:
+                detail = (
+                    "等待 task-finished 超过总上限: "
+                    f"elapsed={elapsed_total:.1f}s, total_timeout={total_timeout:.1f}s, "
+                    f"duration={session.duration:.1f}s"
+                )
+                self._mark_session_failure(session, 'finish_confirm_timeout', detail)
+                raise asyncio.TimeoutError(detail)
+
+            if idle_elapsed >= idle_timeout:
+                detail = (
+                    "等待 task-finished 空闲超时: "
+                    f"idle={idle_elapsed:.1f}s, idle_timeout={idle_timeout:.1f}s, "
+                    f"last_event_age={now - last_event_time:.1f}s"
+                )
+                self._mark_session_failure(session, 'finish_confirm_timeout', detail)
+                raise asyncio.TimeoutError(detail)
+
+            # 每次最多睡 1 秒，便于及时感知后台 reader 更新的 last_event_time。
+            remaining_idle = max(0.1, idle_timeout - idle_elapsed)
+            remaining_total = max(0.1, total_timeout - elapsed_total)
+            wait_slice = min(1.0, remaining_idle, remaining_total)
+            try:
+                await asyncio.wait_for(session.finished_event.wait(), timeout=wait_slice)
+            except asyncio.TimeoutError:
+                continue
+
     def _create_placeholder_session(
         self,
         *,
@@ -335,7 +416,7 @@ class AliyunRealtimeRecognizer:
             else:
                 result = self._run_coro(
                     self._finish_and_collect(local_task_id=task.task_id),
-                    timeout=max(self.finish_confirm_timeout + 15.0, self.response_timeout * 4),
+                    timeout=self._compute_finish_coro_timeout(session),
                 )
         except FutureTimeoutError as e:
             self._mark_session_failure(session, 'finish_confirm_timeout', f'等待 finish 确认超时: {e}')
@@ -597,9 +678,8 @@ class AliyunRealtimeRecognizer:
         await session.ws.send(json.dumps(finish_task, ensure_ascii=False))
         self._record_ws_event(session, event='finish-task-sent', message=None)
         try:
-            await asyncio.wait_for(session.finished_event.wait(), timeout=self.finish_confirm_timeout)
+            await self._wait_for_finish_confirmation(session)
         except asyncio.TimeoutError as e:
-            self._mark_session_failure(session, 'finish_confirm_timeout', f'等待 task-finished 超时: {e}')
             raise
 
         if session.error_message and not session.task_finished_received:
@@ -914,7 +994,7 @@ class AliyunRealtimeRecognizer:
 
             result = self._run_coro(
                 self._finish_and_collect(local_task_id=local_task_id),
-                timeout=max(self.finish_confirm_timeout + 15.0, self.response_timeout * 4),
+                timeout=self._compute_finish_coro_timeout(session),
             )
             return result
         finally:
