@@ -24,7 +24,7 @@ class ServerConfig:
     #   DASHSCOPE_API_KEY=你的密钥
     aliyun_api_key = os.getenv('DASHSCOPE_API_KEY', '')
     aliyun_endpoint = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
-    aliyun_model = 'fun-asr-realtime-2025-11-07'
+    aliyun_model = 'fun-asr-realtime-2026-02-28'
     aliyun_source_language = 'auto'
     aliyun_max_sentence_silence = 800
     aliyun_enable_punctuation = True
@@ -120,7 +120,7 @@ class ClientConfig:
     file_rest_api_key = os.getenv('DASHSCOPE_API_KEY', '')  # 建议通过环境变量注入
     file_rest_submit_url = 'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription'
     file_rest_task_url_template = 'https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}'
-    file_rest_model = 'fun-asr'
+    file_rest_model = 'fun-asr-2025-08-25'
     file_rest_poll_interval = 1.0      # 轮询间隔（秒）
     file_rest_poll_timeout = 7200.0    # 轮询超时（秒）
     file_rest_channel_id = [0]         # 音轨索引提示
@@ -139,7 +139,7 @@ class ClientConfig:
     # 2) 上传完成后得到 oss://key，可直接喂给录音文件 REST 接口；
     # 3) 临时链路更适合开发/中低并发，生产高并发建议使用自建对象存储。
     file_upload_dashscope_policy_url = 'https://dashscope.aliyuncs.com/api/v1/uploads'
-    file_upload_dashscope_model = 'fun-asr'
+    file_upload_dashscope_model = 'fun-asr-2025-08-25'
     file_upload_dashscope_policy_timeout = 30.0
     file_upload_dashscope_form_timeout = 600.0
 
