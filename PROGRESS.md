@@ -1,7 +1,7 @@
 # 项目状态快照
 
 ## 当前结论（必须最新）
-- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并完成“实时链路止血版稳健性改造（失败保底 + 失败任务落盘 + 手动重试入口）”；这次又修复长音频失败重放的 `task-finished` 等待策略，避免云端仍在持续返回 `result-generated` 时被固定 120 秒超时误杀。
+- 现状：已在 GitHub fork 分支 `feat/bailian-cloud-migration` 完成云端迁移基线，并完成“实时链路止血版稳健性改造（失败保底 + 失败任务落盘 + 手动重试入口）”；最新又补齐空识别诊断：云端正常 `task-finished` 但文本为空时，会用本地音频 RMS/峰值区分“疑似没录到声音”和“检测到声音但云端空识别”，后者会自动重试一次并在重试失败时落盘。
 - 已完成：
   - 已核对官方文档与 Context7 来源，可支撑本次改造。
   - 已完成本地快照基线提交并推送到 fork 分支。
@@ -68,13 +68,22 @@
     - 已确认文件转写已独立，不再依赖本地实时服务端 WebSocket
     - 已确认热词后处理只作用于麦克风最终结果，不作用于文件转写结果
     - 已标记当前可延后能力：本地模型、LLM、UDP、繁体、录音保存等
-- 正在做：一边继续验证“长按说话 -> 单会话云端识别 -> 松开后一次性上屏”的端到端链路，一边把新 Rust/Tauri 项目的边界收紧到最小可重构集合。
+  - 空识别诊断与自动重试已完成：
+    - `util/server/asr_aliyun_realtime.py` 已累计音频诊断字段：样本数、RMS、峰值、有声帧比例。
+    - 云端正常 `task-finished` 但最终文本为空时，不再算 `success_confirmed`。
+    - 近静音空结果返回 `failed_silent_audio`，不自动重试、不落无意义失败目录。
+    - 有声音空结果返回 `failed_empty_result`，自动重试一次；重试仍失败则保存 `audio.pcm/meta.json/ws_events.jsonl/error.txt`。
+    - 服务端结果协议与客户端结果处理已透传并打印 `audio_diagnostics`。
+    - `tests/test_aliyun_finish_wait.py` 已补充静音空结果、有声空结果和正常文本成功路径单测。
+- 正在做：观察真实麦克风场景下空识别诊断的 RMS/peak 阈值是否合适，同时继续收敛新 Rust/Tauri 项目的最小可重构集合。
 - 下一步：
   - 用真实语音流验证句子状态机在连续说话场景下无“覆盖前文/重复叠加”问题。
   - 完成 Phase 2：云端会话有限并发（当前仍是识别子进程串行调度，final 任务会阻塞后续任务）。
   - 评估是否需要把客户端发送节奏也统一为固定 100ms（当前已在服务端做 100ms 传输分帧）。
   - 补充 readme 的“实时链路状态机”说明与调参建议。
   - 观察新“尾包时延”指标（抬键 -> 开始上屏）与“总耗时”在短句场景下的差异，确认体验改进效果。
+  - 故意静音录一段，确认 `failed_silent_audio` 不自动重试、不生成失败任务目录。
+  - 若真实说话再次出现空结果，确认 `failed_empty_result` 自动重试与失败落盘是否按预期触发；必要时根据日志调整音量阈值。
   - 验证 `retry_failed_tasks.py` 在多失败任务并存时的交互体验，并视需要补充 `show/list/retry all` 参数模式或直接按 `task_id` 选择。
   - 把 `docs/rust_tauri_rebuild_report.md` 进一步收敛成 Rust 核心模块接口草案（状态机、配置、命令、事件、错误模型）。
 
@@ -101,6 +110,8 @@
   - 原因：云端实时 WS 会话断线后通常不可续；整段重放实现简单且可靠。
 - 决策K：`finish_confirm_timeout` 作为“云端事件空闲超时”，不再作为固定总等待时间。
   - 原因：失败后的整段 PCM 重放可能会持续返回 `result-generated`，只要云端仍在输出，就不应被固定秒数误杀；同时保留按音频时长放大的总上限，防止异常连接永久挂住。
+- 决策L：空识别先按音频能量分流，再决定是否重试。
+  - 原因：近静音任务重放没有价值；检测到明显声音但云端返回空文本才是需要自动重试和落盘复盘的异常。
 
 ## 常见坑 / 复现方法
 - 坑1：REST 文件识别不支持本地文件直传与 base64。
@@ -119,5 +130,7 @@
   - 复现：长按说话 >120 秒，最后阶段网络抖动，服务端等待 `task-finished` 超时。
 - 坑9：失败后的整段 PCM 重放不是实时说话，云端可能需要持续处理并返回 `result-generated`，固定 120 秒总等待会误杀长音频。
   - 复现：原始实时会话中途 `keepalive ping timeout`，自动/手动重试长音频时在 `finish_wait_s≈120s` 仍有 `result-generated`，但本地提前判定 `finish_confirm_timeout`。
+- 坑10：云端返回 `task-finished` 不等于一定有文本。
+  - 复现：`ASR_WS` 日志出现 `task-started -> result-generated -> finish-task-sent -> task-finished`，但所有 `result-generated` 都是 `text_len=0/words_count=0`；需要看 `audio_diagnostics.has_voice` 判断是没录到声音还是云端空识别。
 - 坑8：文件 REST 任务即使 `SUCCEEDED`，也可能只返回 `transcription_url`，不一定内联 `transcripts`。
   - 复现：提交 `oss://` 音频后查询任务结果，`output.results[0]` 仅包含 `transcription_url`。

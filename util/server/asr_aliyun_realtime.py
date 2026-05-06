@@ -50,6 +50,7 @@ class AliyunFinalResult:
     salvage_text_partial: str = ''
     needs_manual_retry: bool = False
     retry_task_ref: str = ''
+    audio_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -92,6 +93,15 @@ class _SessionState:
     ws_events: List[dict] = field(default_factory=list)
     retry_attempted: bool = False
     stream_unavailable: bool = False
+    # 音频诊断字段：
+    # - sample_count / square_sum / abs_peak 用于计算整段 RMS 和峰值。
+    # - frame_count / voiced_frame_count 用于估算“有明显声音的音频帧比例”。
+    # 这些字段只做排障和空结果分流，不替代专业 VAD。
+    audio_sample_count: int = 0
+    audio_square_sum: float = 0.0
+    audio_abs_peak: float = 0.0
+    audio_frame_count: int = 0
+    audio_voiced_frame_count: int = 0
 
 
 class AliyunRealtimeRecognizer:
@@ -121,6 +131,9 @@ class AliyunRealtimeRecognizer:
         failed_task_store_dir: str = 'runtime/failed_tasks',
         failed_audio_delete_on_replay_success: bool = True,
         ws_log_verbosity: str = 'summary',
+        empty_result_retry_on_voice: bool = True,
+        voice_rms_threshold: float = 0.003,
+        voice_peak_threshold: float = 0.02,
     ) -> None:
         if not api_key:
             raise ValueError("DASHSCOPE_API_KEY 未配置，无法使用 aliyun_realtime 模式")
@@ -140,6 +153,9 @@ class AliyunRealtimeRecognizer:
         self.failed_task_store_enabled = bool(failed_task_store_enabled)
         self.failed_audio_delete_on_replay_success = bool(failed_audio_delete_on_replay_success)
         self.ws_log_verbosity = str(ws_log_verbosity or 'summary')
+        self.empty_result_retry_on_voice = bool(empty_result_retry_on_voice)
+        self.voice_rms_threshold = max(0.0, float(voice_rms_threshold))
+        self.voice_peak_threshold = max(0.0, float(voice_peak_threshold))
         self._failed_task_store = FailedTaskStore(failed_task_store_dir) if self.failed_task_store_enabled else None
         self._spool_dir = Path(failed_task_store_dir) / '_spool'
         self._spool_dir.mkdir(parents=True, exist_ok=True)
@@ -192,6 +208,7 @@ class AliyunRealtimeRecognizer:
         # 不论云端会话是否正常，都先把整次会话音频持续落盘，保证后续可重试。
         if samples.size > 0:
             session.duration += len(samples) / max(1, int(task.samplerate))
+            self._update_audio_diagnostics(session, samples)
             self._append_pcm_spool(session, pcm_bytes)
             if not session.failure_reason:
                 try:
@@ -427,8 +444,9 @@ class AliyunRealtimeRecognizer:
             result = self._build_failure_result(session, error_code='finish_collect_error')
 
         # 自动重试一次（使用整次会话 PCM 临时文件），成功则当作最终成功结果返回。
+        # 静音类空结果不重试；有明显声音但云端返回空文本才重试，避免无意义重放。
         if (
-            result.status != 'success_confirmed'
+            self._should_auto_retry_result(result)
             and self.auto_retry_once
             and not session.retry_attempted
             and session.pcm_spool_path
@@ -440,9 +458,25 @@ class AliyunRealtimeRecognizer:
                 logger.warning("失败任务自动重试成功: local_task_id=%s", session.local_task_id)
                 self._delete_spool_file(session.pcm_spool_path)
                 result = retry_result
+            elif retry_result is not None:
+                session.ws_events.append({
+                    't': time.time(),
+                    'event': 'auto-retry-failed',
+                    'local_task_id': session.local_task_id,
+                    'retry_status': retry_result.status,
+                    'retry_error_code': retry_result.error_code,
+                    'retry_error_message': retry_result.error_message,
+                    'retry_audio_diagnostics': retry_result.audio_diagnostics,
+                })
+                retry_message = (
+                    f"自动重试仍未成功: status={retry_result.status}, "
+                    f"error={retry_result.error_code or retry_result.error_message}"
+                )
+                result.error_message = f"{result.error_message} | {retry_message}".strip(" |")
 
-        # 未成功则保存失败任务记录（包含音频/保底文本/事件摘要）
-        if result.status != 'success_confirmed':
+        # 未成功则保存失败任务记录（包含音频/保底文本/事件摘要）。
+        # 纯静音/近静音任务不落盘，避免把“没有可重试价值”的任务堆到 failed_tasks。
+        if self._should_persist_failure_result(result):
             task_ref = self._persist_failure_record(session, result)
             result.needs_manual_retry = bool(task_ref)
             result.retry_task_ref = task_ref or ''
@@ -487,7 +521,40 @@ class AliyunRealtimeRecognizer:
             salvage_text_partial=partial_text,
             needs_manual_retry=False,
             retry_task_ref='',
+            audio_diagnostics=self._audio_diagnostics_summary(session),
         )
+
+    def _should_auto_retry_result(self, result: AliyunFinalResult) -> bool:
+        """
+        判断失败结果是否值得自动重试。
+
+        规则：
+        - 近静音空结果不重试，因为重放同一段静音没有意义。
+        - 有声音但云端空识别时，只有配置允许才重试。
+        - 其他网络/收尾异常沿用原来的自动重试策略。
+        """
+        if result.status == 'success_confirmed':
+            return False
+        if result.status == 'failed_silent_audio':
+            return False
+        if result.status == 'failed_empty_result':
+            return self.empty_result_retry_on_voice
+        return True
+
+    def _should_persist_failure_result(self, result: AliyunFinalResult) -> bool:
+        """
+        判断失败结果是否应保存到 `runtime/failed_tasks`。
+
+        保存原则：
+        - 成功结果不保存。
+        - 近静音空结果不保存，因为重试同一段近静音 PCM 基本没有排障价值。
+        - 其他失败都保存，尤其是“检测到声音但云端空识别”，需要保留音频和 WS 事件供复盘。
+        """
+        if result.status == 'success_confirmed':
+            return False
+        if result.status == 'failed_silent_audio':
+            return False
+        return True
 
     def _persist_failure_record(self, session: _SessionState, result: AliyunFinalResult) -> str:
         """把失败任务落盘到 failed_task_store，返回 task_ref（失败时返回空字符串）。"""
@@ -514,6 +581,7 @@ class AliyunRealtimeRecognizer:
                     'result_generated_count': session.result_generated_count,
                     'final_sentence_count': session.final_sentence_count,
                     'partial_sentence_count': session.partial_sentence_count,
+                    'audio_diagnostics': self._audio_diagnostics_summary(session),
                 },
             )
         except Exception:
@@ -686,6 +754,9 @@ class AliyunRealtimeRecognizer:
             raise RuntimeError(session.error_message)
 
         text, tokens, timestamps = self._build_final_text(session)
+        if not text.strip():
+            return self._build_empty_result(session)
+
         return AliyunFinalResult(
             text=text,
             tokens=tokens,
@@ -694,6 +765,7 @@ class AliyunRealtimeRecognizer:
             time_start=session.time_start,
             time_submit=session.time_submit,
             status='success_confirmed',
+            audio_diagnostics=self._audio_diagnostics_summary(session),
         )
 
     async def _close_session(self, local_task_id: str) -> None:
@@ -846,6 +918,12 @@ class AliyunRealtimeRecognizer:
         if session.finish_sent_time:
             summary['finish_wait_s'] = round(max(0.0, now_ts - session.finish_sent_time), 3)
 
+        audio_summary = self._audio_diagnostics_summary(session)
+        summary['audio_rms'] = audio_summary['rms']
+        summary['audio_peak'] = audio_summary['peak']
+        summary['audio_voiced_ratio'] = audio_summary['voiced_ratio']
+        summary['audio_has_voice'] = audio_summary['has_voice']
+
         if isinstance(message, dict):
             payload = message.get('payload', {})
             output = payload.get('output', {}) if isinstance(payload, dict) else {}
@@ -947,6 +1025,133 @@ class AliyunRealtimeRecognizer:
         if not finalized_text and not partial_text:
             console.print("  [yellow]未拿到可用文本保底[/]")
 
+    def _update_audio_diagnostics(self, session: _SessionState, samples: np.ndarray) -> None:
+        """
+        累计当前音频帧的音量诊断信息。
+
+        输入：
+        - session：当前本地录音任务对应的会话状态。
+        - samples：客户端发来的 float32 单声道采样，取值大致在 -1.0 到 1.0。
+
+        输出：
+        - 无返回值；函数会原地更新 session 的累计统计字段。
+
+        核心逻辑：
+        - RMS 反映整段平均能量，峰值反映是否出现过较明显声音。
+        - 每个服务端 100ms 分帧按“RMS 或峰值过阈值”计为有声帧。
+        - 这里故意不用复杂 VAD，先用可解释、可打日志、可调阈值的工程指标定位问题。
+        """
+        if samples.size == 0:
+            return
+
+        normalized = np.asarray(samples, dtype=np.float32).reshape(-1)
+        square_sum = float(np.sum(normalized * normalized))
+        peak = float(np.max(np.abs(normalized))) if normalized.size else 0.0
+        rms = float(np.sqrt(square_sum / max(1, int(normalized.size))))
+
+        session.audio_sample_count += int(normalized.size)
+        session.audio_square_sum += square_sum
+        session.audio_abs_peak = max(float(session.audio_abs_peak), peak)
+        session.audio_frame_count += 1
+        if rms >= self.voice_rms_threshold or peak >= self.voice_peak_threshold:
+            session.audio_voiced_frame_count += 1
+
+    def _audio_diagnostics_summary(self, session: _SessionState) -> Dict[str, Any]:
+        """
+        生成可写入日志/客户端/失败任务元数据的音频诊断摘要。
+
+        字段含义：
+        - rms：整段均方根能量，越大表示平均声音越强。
+        - peak：整段最大绝对振幅，越大表示出现过越强的瞬时声音。
+        - voiced_ratio：有声帧比例，粗略反映整段里有明显声音的时间占比。
+        - has_voice：是否达到“值得把空识别归因给云端/模型，而不是静音”的最低标准。
+        """
+        sample_count = max(0, int(session.audio_sample_count))
+        frame_count = max(0, int(session.audio_frame_count))
+        rms = 0.0
+        if sample_count > 0:
+            rms = float(np.sqrt(max(0.0, float(session.audio_square_sum)) / sample_count))
+        peak = float(session.audio_abs_peak or 0.0)
+        voiced_ratio = 0.0
+        if frame_count > 0:
+            voiced_ratio = float(session.audio_voiced_frame_count) / frame_count
+        has_voice = rms >= self.voice_rms_threshold or peak >= self.voice_peak_threshold
+
+        return {
+            'sample_count': sample_count,
+            'duration': round(float(session.duration or 0.0), 3),
+            'rms': round(rms, 6),
+            'peak': round(peak, 6),
+            'voiced_ratio': round(voiced_ratio, 4),
+            'voiced_frame_count': int(session.audio_voiced_frame_count),
+            'frame_count': frame_count,
+            'has_voice': bool(has_voice),
+            'rms_threshold': self.voice_rms_threshold,
+            'peak_threshold': self.voice_peak_threshold,
+        }
+
+    def _build_empty_result(self, session: _SessionState) -> AliyunFinalResult:
+        """
+        处理“云端正常 task-finished，但最终文本为空”的特殊失败。
+
+        这类情况过去被误当成 `success_confirmed`，导致：
+        - 客户端只看到空识别结果；
+        - 成功路径删除临时 PCM；
+        - 没有失败目录可供事后排查。
+
+        新规则：
+        - 没检测到有效声音：`failed_silent_audio`，不自动重试，不落 failed_tasks。
+        - 检测到有效声音：`failed_empty_result`，允许自动重试；重试仍空再落盘。
+        """
+        audio_summary = self._audio_diagnostics_summary(session)
+        if audio_summary['has_voice']:
+            status = 'failed_empty_result'
+            message = (
+                "检测到有效声音，但云端 task-finished 后仍返回空文本；"
+                "将按配置自动重试一次，若仍为空会保存失败任务用于排查。"
+            )
+        else:
+            status = 'failed_silent_audio'
+            message = (
+                "疑似没有录到有效声音：云端正常结束但文本为空，"
+                "且本地音量 RMS/峰值均低于阈值；本次不自动重试。"
+            )
+
+        session.ws_events.append({
+            't': time.time(),
+            'event': 'empty-final-text-diagnosed',
+            'local_task_id': session.local_task_id,
+            'cloud_task_id': session.cloud_task_id,
+            'status': status,
+            'audio_diagnostics': audio_summary,
+        })
+        logger.warning(
+            "百炼实时空结果诊断: local_task_id=%s, status=%s, audio=%s",
+            session.local_task_id,
+            status,
+            json.dumps(audio_summary, ensure_ascii=False),
+        )
+        console.print(
+            f"[yellow]ASR空结果诊断[{session.local_task_id[:8]}][/]: "
+            f"{status}, RMS={audio_summary['rms']}, peak={audio_summary['peak']}, "
+            f"有声帧比例={audio_summary['voiced_ratio']}"
+        )
+
+        return AliyunFinalResult(
+            text='',
+            tokens=[],
+            timestamps=[],
+            duration=session.duration,
+            time_start=session.time_start,
+            time_submit=session.time_submit,
+            status=status,
+            error_code=status,
+            error_message=message,
+            needs_manual_retry=False,
+            retry_task_ref='',
+            audio_diagnostics=audio_summary,
+        )
+
     def transcribe_pcm_file(
         self,
         *,
@@ -987,7 +1192,9 @@ class AliyunRealtimeRecognizer:
                     chunk = f.read(chunk_bytes)
                     if not chunk:
                         break
+                    samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
                     session.duration += len(chunk) / (2.0 * max(1, int(samplerate)))
+                    self._update_audio_diagnostics(session, samples)
                     if enable_spool:
                         self._append_pcm_spool(session, chunk)
                     self._run_coro(self._send_pcm(local_task_id=local_task_id, pcm_bytes=chunk), timeout=self.response_timeout)

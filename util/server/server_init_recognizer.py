@@ -93,6 +93,7 @@ def _build_result_from_aliyun_final(task, final_result: AliyunFinalResult) -> Re
     result.salvage_text_partial = getattr(final_result, 'salvage_text_partial', '') or ''
     result.needs_manual_retry = bool(getattr(final_result, 'needs_manual_retry', False))
     result.retry_task_ref = getattr(final_result, 'retry_task_ref', '') or ''
+    result.audio_diagnostics = dict(getattr(final_result, 'audio_diagnostics', {}) or {})
     return result
 
 
@@ -167,6 +168,9 @@ def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue,
                 failed_task_store_dir=getattr(Config, 'failed_task_store_dir', 'runtime/failed_tasks'),
                 failed_audio_delete_on_replay_success=getattr(Config, 'failed_audio_delete_on_replay_success', True),
                 ws_log_verbosity=getattr(Config, 'aliyun_ws_log_verbosity', 'summary'),
+                empty_result_retry_on_voice=getattr(Config, 'empty_result_retry_on_voice', True),
+                voice_rms_threshold=getattr(Config, 'voice_rms_threshold', 0.003),
+                voice_peak_threshold=getattr(Config, 'voice_peak_threshold', 0.02),
             )
         elif model_type == 'fun_asr_nano':
             logger.debug("使用 Fun-ASR-Nano 模型")

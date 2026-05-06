@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer, _SessionState
+from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer, _SentenceState, _SessionState
 
 
 def _new_recognizer_for_wait_test(
@@ -32,6 +32,10 @@ def _new_recognizer_for_wait_test(
     recognizer = AliyunRealtimeRecognizer.__new__(AliyunRealtimeRecognizer)
     recognizer.finish_confirm_timeout = finish_confirm_timeout
     recognizer.response_timeout = response_timeout
+    recognizer.empty_result_retry_on_voice = True
+    recognizer.voice_rms_threshold = 0.003
+    recognizer.voice_peak_threshold = 0.02
+    recognizer.ws_log_verbosity = 'error_only'
     return recognizer
 
 
@@ -145,6 +149,86 @@ class AliyunFinishWaitTest(unittest.TestCase):
             recognizer._compute_finish_total_timeout(long_session),
             550.25 * 1.5 + 120.0,
         )
+
+    def test_empty_text_with_silent_audio_does_not_retry(self) -> None:
+        """
+        云端正常结束但文本为空，且本地音量低于阈值时，应判为“疑似没录到声音”。
+
+        这个用例保护一个关键产品行为：
+        - 静音/近静音任务不进入自动重试，避免重复扣费和堆积无意义失败记录。
+        - 客户端仍能拿到清晰错误状态，用于提示用户检查麦克风或说话音量。
+        """
+        recognizer = _new_recognizer_for_wait_test()
+        session = _new_session_for_wait_test(duration=1.0)
+
+        result = recognizer._build_empty_result(session)
+
+        self.assertEqual(result.status, "failed_silent_audio")
+        self.assertFalse(result.audio_diagnostics["has_voice"])
+        self.assertFalse(recognizer._should_auto_retry_result(result))
+        self.assertFalse(recognizer._should_persist_failure_result(result))
+
+    def test_empty_text_with_voice_is_retryable_empty_result(self) -> None:
+        """
+        云端正常结束但文本为空，且本地检测到有效声音时，应判为“云端空识别”。
+
+        这正是用户现场遇到的问题：人确实说话了，但云端返回 `words_count=0`。
+        该状态应允许自动重试一次；如果重试仍为空，再进入失败任务落盘。
+        """
+        recognizer = _new_recognizer_for_wait_test()
+        session = _new_session_for_wait_test(duration=1.0)
+        session.audio_sample_count = 16000
+        session.audio_square_sum = 16000 * (0.01 ** 2)
+        session.audio_abs_peak = 0.08
+        session.audio_frame_count = 10
+        session.audio_voiced_frame_count = 8
+
+        result = recognizer._build_empty_result(session)
+
+        self.assertEqual(result.status, "failed_empty_result")
+        self.assertTrue(result.audio_diagnostics["has_voice"])
+        self.assertTrue(recognizer._should_auto_retry_result(result))
+        self.assertTrue(recognizer._should_persist_failure_result(result))
+
+    def test_final_text_success_remains_success_confirmed(self) -> None:
+        """
+        正常有文本的任务应保持原成功路径。
+
+        这个用例防止空结果诊断误伤普通识别：只要句子状态机汇总出了文本，
+        最终结果仍然是 `success_confirmed`，后续热词、LLM、上屏链路不变。
+        """
+
+        class _FakeWebSocket:
+            """测试用假 WebSocket，只记录发送内容，不连接真实云端。"""
+
+            def __init__(self) -> None:
+                self.sent_messages: list[str] = []
+
+            async def send(self, message: str) -> None:
+                self.sent_messages.append(message)
+
+        async def scenario() -> None:
+            recognizer = _new_recognizer_for_wait_test()
+            session = _new_session_for_wait_test(duration=1.0)
+            session.ws = _FakeWebSocket()
+            session.task_finished_received = True
+            session.finished_event.set()
+            session.sentences["begin:0"] = _SentenceState(
+                key="begin:0",
+                order=0,
+                begin_time=0.0,
+                text="你好。",
+                is_final=True,
+            )
+            recognizer._sessions = {session.local_task_id: session}
+
+            result = await recognizer._finish_and_collect(session.local_task_id)
+
+            self.assertEqual(result.status, "success_confirmed")
+            self.assertEqual(result.text, "你好。")
+            self.assertEqual(result.error_code, "")
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ async def ws_send():
                 'salvage_text_partial': getattr(result, 'salvage_text_partial', ''),
                 'needs_manual_retry': bool(getattr(result, 'needs_manual_retry', False)),
                 'retry_task_ref': getattr(result, 'retry_task_ref', ''),
+                'audio_diagnostics': getattr(result, 'audio_diagnostics', {}) or {},
             }
 
             # 获得 socket

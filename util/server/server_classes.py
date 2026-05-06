@@ -7,7 +7,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -67,6 +67,7 @@ class Result:
         error_code/error_message: 失败时的错误信息
         salvage_*: 失败保底文本（定稿/未定稿）
         needs_manual_retry/retry_task_ref: 是否需要手动重试及失败任务引用
+        audio_diagnostics: 本次录音音量诊断摘要，用于区分“没录到声音”和“云端空识别”
     """
     task_id: str
     socket_id: str
@@ -95,3 +96,4 @@ class Result:
     salvage_text_partial: str = ''
     needs_manual_retry: bool = False
     retry_task_ref: str = ''
+    audio_diagnostics: Dict[str, Any] = field(default_factory=dict)

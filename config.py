@@ -37,6 +37,12 @@ class ServerConfig:
     aliyun_auto_retry_once = True
     aliyun_retry_backoff_seconds = 0.5
     aliyun_ws_log_verbosity = 'summary'    # summary | full | error_only
+    # 空识别诊断策略：
+    # - 云端正常返回 task-finished 但文本为空时，先用 RMS/峰值粗略判断是否真的录到声音。
+    # - 检测到声音才自动重试；没检测到有效声音则直接提示，避免保存一堆无意义静音任务。
+    empty_result_retry_on_voice = True
+    voice_rms_threshold = 0.003
+    voice_peak_threshold = 0.02
     # 失败任务落盘（音频 + 元数据 + 保底文本）
     failed_task_store_enabled = True
     failed_task_store_dir = 'runtime/failed_tasks'

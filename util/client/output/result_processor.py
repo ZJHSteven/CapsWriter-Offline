@@ -229,6 +229,7 @@ class ResultProcessor:
         error_message = str(message.get('error_message') or '')
         salvage_text_finalized = str(message.get('salvage_text_finalized') or '')
         salvage_text_partial = str(message.get('salvage_text_partial') or '')
+        audio_diagnostics = message.get('audio_diagnostics') or {}
         # 历史口径：从服务端“开始识别该任务”到服务端结果完成的总耗时。
         # 对实时长录音来说，这个值会天然包含说话过程，因此常常大于录音时长。
         total_cost = message['time_complete'] - message['time_submit']
@@ -248,10 +249,24 @@ class ResultProcessor:
         # 失败/保底结果：默认只打印和备份，不自动上屏（避免误打到错误窗口）。
         if result_status != 'success_confirmed':
             console.print(f'    [yellow]识别失败（保底）状态：{result_status}')
+            if result_status == 'failed_silent_audio':
+                console.print('    [yellow]诊断：疑似未录到有效声音，本次不自动重试')
+            elif result_status == 'failed_empty_result':
+                console.print('    [yellow]诊断：检测到声音，但云端最终返回空文本')
             if error_code:
                 console.print(f'    [yellow]错误码：{error_code}')
             if error_message:
                 console.print(f'    [yellow]错误信息：{error_message}')
+            if isinstance(audio_diagnostics, dict) and audio_diagnostics:
+                rms = audio_diagnostics.get('rms', 'N/A')
+                peak = audio_diagnostics.get('peak', 'N/A')
+                voiced_ratio = audio_diagnostics.get('voiced_ratio', 'N/A')
+                duration = audio_diagnostics.get('duration', 'N/A')
+                has_voice = audio_diagnostics.get('has_voice', False)
+                console.print(
+                    f'    [cyan]音频诊断：duration={duration}s, RMS={rms}, '
+                    f'peak={peak}, 有声帧比例={voiced_ratio}, 检测到声音={has_voice}'
+                )
             if salvage_text_finalized:
                 console.print(f'    [cyan]已定稿保底：{salvage_text_finalized}')
             if salvage_text_partial:
