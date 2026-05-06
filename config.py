@@ -43,6 +43,15 @@ class ServerConfig:
     empty_result_retry_on_voice = True
     voice_rms_threshold = 0.003
     voice_peak_threshold = 0.02
+    # 云端“尾部空文本”兜底：
+    # - 背景：有时云端前半段正常出字，但最后一个较长时间段返回 `text="" / words=[]`，
+    #   并且仍然正常 `task-finished`。这类结果不能当作完全成功，否则临时 PCM 会被删除，
+    #   事后也无法重放验证。
+    # - 这里不把所有空段都判错：用户中间停顿、思考、查资料是正常行为。
+    # - 只有“最后一个空文本定稿段足够长，并且一直靠近录音结尾”才触发重试。
+    tail_empty_retry_enabled = True
+    tail_empty_min_seconds = 15.0
+    tail_empty_end_tolerance_seconds = 3.0
     # 失败任务落盘（音频 + 元数据 + 保底文本）
     failed_task_store_enabled = True
     failed_task_store_dir = 'runtime/failed_tasks'

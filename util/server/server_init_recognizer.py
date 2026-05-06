@@ -171,6 +171,9 @@ def init_recognizer(queue_in_mic: Queue, queue_in_file: Queue, queue_out: Queue,
                 empty_result_retry_on_voice=getattr(Config, 'empty_result_retry_on_voice', True),
                 voice_rms_threshold=getattr(Config, 'voice_rms_threshold', 0.003),
                 voice_peak_threshold=getattr(Config, 'voice_peak_threshold', 0.02),
+                tail_empty_retry_enabled=getattr(Config, 'tail_empty_retry_enabled', True),
+                tail_empty_min_seconds=getattr(Config, 'tail_empty_min_seconds', 15.0),
+                tail_empty_end_tolerance_seconds=getattr(Config, 'tail_empty_end_tolerance_seconds', 3.0),
             )
         elif model_type == 'fun_asr_nano':
             logger.debug("使用 Fun-ASR-Nano 模型")

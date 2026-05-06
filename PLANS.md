@@ -1,5 +1,24 @@
 # ExecPlan（阿里百炼云端改造）
 
+## ExecPlan（2026-05-06：尾部空文本兜底重试）
+
+### 目标
+- 研究“云端中途之后一直返回空文本，但任务仍正常 `task-finished`”的原因边界。
+- 不把用户中间思考停顿误判为失败。
+- 对“前面有文本、最后一个长空文本段一路贴近录音结尾”的结果改判为可重试。
+
+### 执行步骤
+- [x] 查阅阿里云百炼 Fun-ASR 实时 WebSocket / Python SDK 官方文档，核对格式、采样率、分包、VAD、stop/finish 语义。
+- [x] 对照本地日志确认问题形态：整段音频已发送到云端，云端正常 `task-finished`，但尾部空文本定稿段没有文字。
+- [x] 在识别器里记录空文本定稿段的 begin/end/duration。
+- [x] 成功收尾前增加尾部空段判定：仅尾部长空段触发，不误伤中间停顿。
+- [x] 触发后返回 `failed_tail_empty_result`，沿用现有自动重试和失败落盘链路。
+- [x] 补单元测试覆盖中间空段不误判、尾部空段可重试。
+
+### 验证
+- [x] `python -m py_compile util\server\asr_aliyun_realtime.py util\server\server_init_recognizer.py config.py tests\test_aliyun_finish_wait.py`
+- [x] `uv run --with rich --with websockets --with numpy python -m unittest tests.test_aliyun_finish_wait -v`
+
 ## ExecPlan（2026-05-06：空识别音量诊断与重试观察）
 
 ### 目标

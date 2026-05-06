@@ -13,7 +13,12 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from util.server.asr_aliyun_realtime import AliyunRealtimeRecognizer, _SentenceState, _SessionState
+from util.server.asr_aliyun_realtime import (
+    AliyunRealtimeRecognizer,
+    _EmptyFinalSpan,
+    _SentenceState,
+    _SessionState,
+)
 
 
 def _new_recognizer_for_wait_test(
@@ -35,6 +40,9 @@ def _new_recognizer_for_wait_test(
     recognizer.empty_result_retry_on_voice = True
     recognizer.voice_rms_threshold = 0.003
     recognizer.voice_peak_threshold = 0.02
+    recognizer.tail_empty_retry_enabled = True
+    recognizer.tail_empty_min_seconds = 15.0
+    recognizer.tail_empty_end_tolerance_seconds = 3.0
     recognizer.ws_log_verbosity = 'error_only'
     return recognizer
 
@@ -217,6 +225,7 @@ class AliyunFinishWaitTest(unittest.TestCase):
                 key="begin:0",
                 order=0,
                 begin_time=0.0,
+                end_time=1.0,
                 text="你好。",
                 is_final=True,
             )
@@ -229,6 +238,81 @@ class AliyunFinishWaitTest(unittest.TestCase):
             self.assertEqual(result.error_code, "")
 
         asyncio.run(scenario())
+
+    def test_middle_empty_span_does_not_mark_success_as_retryable(self) -> None:
+        """
+        中间出现较长空段，但后面又有有效文字时，不应误判为尾部漏识别。
+
+        用户真实使用时可能按着快捷键思考、查资料、短暂停顿；这些空段只要不是
+        “一路空到录音结束”，就不应该触发重试，避免无意义扣费和干扰上屏。
+        """
+        recognizer = _new_recognizer_for_wait_test()
+        session = _new_session_for_wait_test(duration=50.0)
+        session.sentences["begin:0"] = _SentenceState(
+            key="begin:0",
+            order=0,
+            begin_time=0.0,
+            end_time=10.0,
+            text="前半句。",
+            is_final=True,
+        )
+        session.empty_final_spans.append(_EmptyFinalSpan(
+            begin_time=20.0,
+            end_time=30.0,
+            duration=10.0,
+            final_sentence_count_before=1,
+        ))
+        session.sentences["begin:35"] = _SentenceState(
+            key="begin:35",
+            order=1,
+            begin_time=35.0,
+            end_time=48.0,
+            text="后半句。",
+            is_final=True,
+        )
+
+        text, tokens, timestamps = recognizer._build_final_text(session)
+        result = recognizer._build_tail_empty_result_if_needed(session, text, tokens, timestamps)
+
+        self.assertIsNone(result)
+
+    def test_tail_empty_span_marks_result_retryable(self) -> None:
+        """
+        前面已有文字，但最后一路空到结束时，应改判为可重试的尾部空结果。
+
+        这个用例对应用户现场现象：
+        - 前 58 秒云端正常定稿。
+        - 58 秒之后到 111 秒云端仍返回 `sentence_end=true`，但 `text_len=0`。
+        - 总文本不为空，所以旧逻辑会误判 `success_confirmed` 并删除 PCM。
+        - 新逻辑应保留现有文本作为保底，同时允许自动重试整段 PCM。
+        """
+        recognizer = _new_recognizer_for_wait_test()
+        session = _new_session_for_wait_test(duration=112.8)
+        session.sentences["begin:0"] = _SentenceState(
+            key="begin:0",
+            order=0,
+            begin_time=0.0,
+            end_time=58.58,
+            text="前面已经识别出来的文本。",
+            is_final=True,
+        )
+        session.empty_final_spans.append(_EmptyFinalSpan(
+            begin_time=58.84,
+            end_time=111.06,
+            duration=52.22,
+            final_sentence_count_before=1,
+        ))
+
+        text, tokens, timestamps = recognizer._build_final_text(session)
+        result = recognizer._build_tail_empty_result_if_needed(session, text, tokens, timestamps)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.status, "failed_tail_empty_result")
+        self.assertEqual(result.error_code, "tail_empty_result")
+        self.assertEqual(result.salvage_text_finalized, "前面已经识别出来的文本。")
+        self.assertTrue(recognizer._should_auto_retry_result(result))
+        self.assertTrue(recognizer._should_persist_failure_result(result))
 
 
 if __name__ == "__main__":

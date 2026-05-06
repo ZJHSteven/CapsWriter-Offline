@@ -59,10 +59,29 @@ class _SentenceState:
     key: str
     order: int
     begin_time: Optional[float] = None
+    end_time: Optional[float] = None
     text: str = ''
     is_final: bool = False
     tokens: List[str] = field(default_factory=list)
     timestamps: List[float] = field(default_factory=list)
+
+
+@dataclass
+class _EmptyFinalSpan:
+    """
+    云端“空文本定稿段”的结构化记录。
+
+    背景：
+    - 阿里云实时 ASR 会把 VAD/断句结果通过 `result-generated` 推给客户端。
+    - 有些异常现场里，云端会正常返回 `sentence_end=true` 和 `end_time`，
+      但 `text` 与 `words` 都为空。单个短空段可能只是用户在思考或静音；
+      如果“最后一个长时间空段一直延伸到会话结束”，则更像云端尾部漏识别。
+    - 记录起止时间后，后续可以只对“尾部空段”做重试，而不误伤中间停顿。
+    """
+    begin_time: Optional[float]
+    end_time: Optional[float]
+    duration: float
+    final_sentence_count_before: int
 
 
 @dataclass
@@ -102,6 +121,8 @@ class _SessionState:
     audio_abs_peak: float = 0.0
     audio_frame_count: int = 0
     audio_voiced_frame_count: int = 0
+    # 云端返回的“空文本定稿段”。这不是直接失败证据，只是后续判断尾部漏识别的原始材料。
+    empty_final_spans: List[_EmptyFinalSpan] = field(default_factory=list)
 
 
 class AliyunRealtimeRecognizer:
@@ -134,6 +155,9 @@ class AliyunRealtimeRecognizer:
         empty_result_retry_on_voice: bool = True,
         voice_rms_threshold: float = 0.003,
         voice_peak_threshold: float = 0.02,
+        tail_empty_retry_enabled: bool = True,
+        tail_empty_min_seconds: float = 15.0,
+        tail_empty_end_tolerance_seconds: float = 3.0,
     ) -> None:
         if not api_key:
             raise ValueError("DASHSCOPE_API_KEY 未配置，无法使用 aliyun_realtime 模式")
@@ -156,6 +180,9 @@ class AliyunRealtimeRecognizer:
         self.empty_result_retry_on_voice = bool(empty_result_retry_on_voice)
         self.voice_rms_threshold = max(0.0, float(voice_rms_threshold))
         self.voice_peak_threshold = max(0.0, float(voice_peak_threshold))
+        self.tail_empty_retry_enabled = bool(tail_empty_retry_enabled)
+        self.tail_empty_min_seconds = max(0.0, float(tail_empty_min_seconds))
+        self.tail_empty_end_tolerance_seconds = max(0.0, float(tail_empty_end_tolerance_seconds))
         self._failed_task_store = FailedTaskStore(failed_task_store_dir) if self.failed_task_store_enabled else None
         self._spool_dir = Path(failed_task_store_dir) / '_spool'
         self._spool_dir.mkdir(parents=True, exist_ok=True)
@@ -539,6 +566,8 @@ class AliyunRealtimeRecognizer:
             return False
         if result.status == 'failed_empty_result':
             return self.empty_result_retry_on_voice
+        if result.status == 'failed_tail_empty_result':
+            return self.tail_empty_retry_enabled
         return True
 
     def _should_persist_failure_result(self, result: AliyunFinalResult) -> bool:
@@ -757,6 +786,10 @@ class AliyunRealtimeRecognizer:
         if not text.strip():
             return self._build_empty_result(session)
 
+        tail_empty_result = self._build_tail_empty_result_if_needed(session, text, tokens, timestamps)
+        if tail_empty_result is not None:
+            return tail_empty_result
+
         return AliyunFinalResult(
             text=text,
             tokens=tokens,
@@ -767,6 +800,112 @@ class AliyunRealtimeRecognizer:
             status='success_confirmed',
             audio_diagnostics=self._audio_diagnostics_summary(session),
         )
+
+    def _build_tail_empty_result_if_needed(
+        self,
+        session: _SessionState,
+        text: str,
+        tokens: List[str],
+        timestamps: List[float],
+    ) -> Optional[AliyunFinalResult]:
+        """
+        判断“前面有文本，但尾部被云端空文本段吞掉”的异常，并构造可重试结果。
+
+        判定边界：
+        - 只在开关开启时生效。
+        - 必须已有有效文本；整条为空仍交给 `_build_empty_result()`。
+        - 必须存在一个足够长的空文本定稿段。
+        - 这个空段必须靠近整段音频结尾，并且不能在它后面再出现新的有效定稿句。
+
+        这样设计是为了避开正常场景：
+        - 用户中间停顿、思考、查资料，即使超过 5 秒，也只是中间空段，不触发失败。
+        - 用户最后停顿几秒后抬键，也不会因为短尾静音被判失败。
+        - 真正异常的是“从某个时间点开始，后面一路到结束都没有任何文字”。
+        """
+        if not self.tail_empty_retry_enabled:
+            return None
+        if not text.strip():
+            return None
+        if not session.empty_final_spans:
+            return None
+
+        latest_text_end = self._latest_final_text_end_time(session)
+        if latest_text_end is None:
+            return None
+
+        candidate = self._latest_tail_empty_span(session)
+        if candidate is None:
+            return None
+        if candidate.duration < self.tail_empty_min_seconds:
+            return None
+        if candidate.begin_time is None or candidate.end_time is None:
+            return None
+
+        # 空段必须位于最后一个有效文本之后；允许 1 秒重叠，兼容云端 VAD 边界抖动。
+        if candidate.begin_time < latest_text_end - 1.0:
+            return None
+
+        # 云端 end_time 与本地累计 duration 不一定完全一致，给一个小容差。
+        tail_gap = max(0.0, float(session.duration or 0.0) - float(candidate.end_time))
+        if tail_gap > self.tail_empty_end_tolerance_seconds:
+            return None
+
+        error_message = (
+            "云端尾部空文本疑似漏识别: "
+            f"empty_begin={candidate.begin_time:.3f}s, "
+            f"empty_end={candidate.end_time:.3f}s, "
+            f"empty_duration={candidate.duration:.3f}s, "
+            f"audio_duration={session.duration:.3f}s"
+        )
+        logger.warning("检测到云端尾部空文本异常: local_task_id=%s, %s", session.local_task_id, error_message)
+
+        return AliyunFinalResult(
+            text=text,
+            tokens=tokens,
+            timestamps=timestamps,
+            duration=session.duration,
+            time_start=session.time_start,
+            time_submit=session.time_submit,
+            status='failed_tail_empty_result',
+            error_code='tail_empty_result',
+            error_message=error_message,
+            salvage_text_finalized=text,
+            salvage_text_partial='',
+            needs_manual_retry=False,
+            retry_task_ref='',
+            audio_diagnostics=self._audio_diagnostics_summary(session),
+        )
+
+    def _latest_final_text_end_time(self, session: _SessionState) -> Optional[float]:
+        """
+        找出最后一个有文字定稿句的结束时间。
+
+        说明：
+        - 优先使用云端 `end_time`，因为它是句子结束边界。
+        - 如果某些返回缺少 `end_time`，退回 `begin_time`，至少还能判断相对顺序。
+        """
+        latest: Optional[float] = None
+        for item in session.sentences.values():
+            if not item.is_final or not item.text:
+                continue
+            candidate = item.end_time if item.end_time is not None else item.begin_time
+            if candidate is None:
+                continue
+            latest = candidate if latest is None else max(latest, candidate)
+        return latest
+
+    def _latest_tail_empty_span(self, session: _SessionState) -> Optional[_EmptyFinalSpan]:
+        """
+        取最后一个有明确结束时间的空文本定稿段。
+
+        多个空段并存时，只看最靠后的一个；如果后面又有有效文字，
+        `_build_tail_empty_result_if_needed()` 会通过 latest_text_end 把它排除。
+        """
+        spans = [item for item in session.empty_final_spans if item.end_time is not None]
+        if not spans:
+            return None
+        spans.sort(key=lambda item: float(item.end_time or -1.0))
+        return spans[-1]
 
     async def _close_session(self, local_task_id: str) -> None:
         """关闭并清理会话对象。"""
@@ -850,6 +989,12 @@ class AliyunRealtimeRecognizer:
         sentence_end = bool(sentence.get("sentence_end"))
 
         if not text and not words:
+            if sentence_end or end_time is not None:
+                self._record_empty_final_span(
+                    session=session,
+                    begin_time=begin_time,
+                    end_time=self._to_seconds(end_time),
+                )
             self._update_sentence_counters(session)
             return
 
@@ -875,6 +1020,7 @@ class AliyunRealtimeRecognizer:
         if sentence_end or end_time is not None:
             was_final = sentence_state.is_final
             sentence_state.is_final = True
+            sentence_state.end_time = self._to_seconds(end_time)
             if not was_final and sentence_state.text:
                 # 句子定稿时立即在服务端终端打印，出现最终失败时至少终端有“战果”。
                 console.print(
@@ -887,6 +1033,48 @@ class AliyunRealtimeRecognizer:
                     sentence_state.text,
                 )
         self._update_sentence_counters(session)
+
+    def _record_empty_final_span(
+        self,
+        *,
+        session: _SessionState,
+        begin_time: Optional[float],
+        end_time: Optional[float],
+    ) -> None:
+        """
+        记录云端已经“定稿”的空文本时间段。
+
+        输入：
+        - session：当前会话状态。
+        - begin_time/end_time：云端返回的毫秒字段换算后的秒级时间。
+
+        输出：
+        - 无返回值；函数只把结构化空段追加到 `session.empty_final_spans`。
+
+        核心逻辑：
+        - 缺少起止时间时仍记录，但 duration 记为 0，避免误判为长尾空段。
+        - 真正触发重试的判断不在这里做，而是在 `_build_tail_empty_result_if_needed`
+          里结合“是否位于尾部”“是否达到最小时长”“是否前文已有有效文本”统一判断。
+        """
+        duration = 0.0
+        if begin_time is not None and end_time is not None:
+            duration = max(0.0, float(end_time) - float(begin_time))
+
+        session.empty_final_spans.append(_EmptyFinalSpan(
+            begin_time=begin_time,
+            end_time=end_time,
+            duration=duration,
+            final_sentence_count_before=session.final_sentence_count,
+        ))
+
+        logger.warning(
+            "云端返回空文本定稿段: local_task_id=%s, begin=%.3f, end=%.3f, duration=%.3f, final_count=%s",
+            session.local_task_id,
+            begin_time if begin_time is not None else -1.0,
+            end_time if end_time is not None else -1.0,
+            duration,
+            session.final_sentence_count,
+        )
 
     def _update_sentence_counters(self, session: _SessionState) -> None:
         """维护定稿句/未定稿句计数，便于日志摘要与失败元数据落盘。"""
