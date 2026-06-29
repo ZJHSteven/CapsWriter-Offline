@@ -101,7 +101,7 @@ class ShortcutManager:
             key_name = KeyMapper.vk_to_name(data.vkCode)
 
             # 防自捕获检查
-            if self._check_emulating(key_name, msg):
+            if self._check_emulating(key_name, msg, data=data):
                 return True
             if self._check_restoring(key_name, msg):
                 return True
@@ -138,7 +138,7 @@ class ShortcutManager:
             button_name = 'x1' if xbutton == XBUTTON1 else 'x2'
 
             # 防自捕获检查
-            if self._check_emulating(button_name, msg, is_mouse=True):
+            if self._check_emulating(button_name, msg, data=data, is_mouse=True):
                 return True
 
             # 查找匹配的快捷键
@@ -222,9 +222,41 @@ class ShortcutManager:
 
     # ========== 防自捕获检查 ==========
 
-    def _check_emulating(self, key_name: str, msg: int, is_mouse: bool = False) -> bool:
-        """检查是否正在模拟按键"""
+    @staticmethod
+    def _is_injected_keyboard_event(data) -> bool:
+        """
+        判断当前键盘事件是否由程序注入。
+
+        Windows 低级键盘钩子的事件数据里有 flags 字段。
+        其中 0x10 是 LLKHF_INJECTED，表示这个事件不是物理键盘直接产生，
+        而是由 SendInput / pynput controller 这类程序模拟出来。
+
+        这个判断很关键：
+        - CapsWriter 自己补发 CapsLock 时，应该吞掉这个注入事件，避免再次启动录音。
+        - 用户真实按下 CapsLock 时，即使刚好同名，也不能因为名称相同就吞掉。
+        """
+        try:
+            return bool(int(data.flags) & 0x10)
+        except Exception:
+            return False
+
+    def _check_emulating(self, key_name: str, msg: int, data=None, is_mouse: bool = False) -> bool:
+        """
+        检查是否正在处理程序补发的按键。
+
+        旧逻辑只看 key_name 是否在 `_emulating_keys` 里。
+        问题是：真实按键和程序补发按键名字相同，例如都叫 caps_lock。
+        如果只按名字判断，真实按键可能被误吞；反过来，如果补发事件没被准确吞掉，
+        它又可能被当作新的快捷键触发，造成“短按补发后又开始录音”的循环。
+
+        新逻辑对键盘事件多加一层 Windows injected 标志判断：
+        只有“当前确实处于补发窗口”且“事件本身是程序注入”的键盘事件才会被吞掉。
+        鼠标 XButton 的 pynput 事件对象没有同样稳定的 injected 标志，这里保留原有行为。
+        """
         if not self._emulator.is_emulating(key_name):
+            return False
+
+        if not is_mouse and not self._is_injected_keyboard_event(data):
             return False
 
         # 松开时清除标志

@@ -44,6 +44,12 @@ class ShortcutTask:
 
         # 任务状态
         self.task: Optional[asyncio.Future] = None
+        # 当前录音会话自己的事件队列。
+        #
+        # 每次 launch 都创建新队列，begin/data/finish 都走这条队列。
+        # 这样即使旧录音协程因为模型慢、WebSocket 慢或短按取消还没完全退出，
+        # 它也不会抢到新录音会话的 finish。
+        self.session_queue: Optional[asyncio.Queue] = None
         self.recording_start_time: float = 0.0
         self.is_recording: bool = False
 
@@ -76,16 +82,22 @@ class ShortcutTask:
 
         # 记录开始时间
         self.recording_start_time = time.time()
+        session_queue = asyncio.Queue()
+
+        # 更新录音状态，并把本次会话队列注册给音频流回调。
+        # 如果已经有录音在进行，说明用户触发了重入；直接忽略本次启动，
+        # 避免多个 recorder 竞争消费同一份麦克风数据。
+        if not self.state.start_recording(self.recording_start_time, session_queue):
+            return
+
         self.is_recording = True
+        self.session_queue = session_queue
 
         # 将开始标志放入队列
         asyncio.run_coroutine_threadsafe(
-            self.state.queue_in.put({'type': 'begin', 'time': self.recording_start_time, 'data': None}),
+            session_queue.put({'type': 'begin', 'time': self.recording_start_time, 'data': None}),
             self.app.loop
         )
-
-        # 更新录音状态
-        self.state.start_recording(self.recording_start_time)
 
         # 打印动画：正在录音
         self._status.start()
@@ -93,7 +105,7 @@ class ShortcutTask:
         # 启动识别任务
         recorder = self._get_recorder()
         self.task = asyncio.run_coroutine_threadsafe(
-            recorder.record_and_send(),
+            recorder.record_and_send(session_queue),
             self.app.loop,
         )
 
@@ -105,25 +117,38 @@ class ShortcutTask:
         self.state.stop_recording()
         self._status.stop()
 
-        self.task.cancel()
-        self.task = None
+        # 取消时尽量唤醒 recorder，让它不要一直阻塞在 session_queue.get()。
+        # 随后再 cancel future，确保等待中的协程尽快退出。
+        if self.session_queue is not None:
+            asyncio.run_coroutine_threadsafe(self.session_queue.put(None), self.app.loop)
+
+        if self.task is not None:
+            self.task.cancel()
+            self.task = None
+        self.session_queue = None
 
     def finish(self) -> None:
         """完成录音任务"""
         logger.info(f"[{self.shortcut.key}] 释放：完成录音")
+
+        session_queue = self.session_queue
+        if session_queue is None:
+            logger.warning(f"[{self.shortcut.key}] 未找到录音会话队列，忽略完成请求")
+            return
 
         self.is_recording = False
         self.state.stop_recording()
         self._status.stop()
 
         asyncio.run_coroutine_threadsafe(
-            self.state.queue_in.put({
+            session_queue.put({
                 'type': 'finish',
                 'time': time.time(),
                 'data': None
             }),
             self.app.loop
         )
+        self.session_queue = None
 
         # 执行 restore（可恢复按键 + 非阻塞模式）
         # 阻塞模式下按键不会发送到系统，状态不会改变，不需要恢复

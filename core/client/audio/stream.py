@@ -78,10 +78,17 @@ class AudioStreamManager:
         
         import asyncio
         
-        # 将数据放入队列
-        if self.app.loop and self.state.queue_in:
+        # 将数据放入当前录音会话队列。
+        #
+        # 这里不能再写入全局 state.queue_in：
+        # - 全局队列会被多个 AudioRecorder 竞争消费。
+        # - 竞争后 data / finish 可能落到不同 task_id。
+        # - active_recording_queue 由 ShortcutTask.launch() 在每次录音开始时注册，
+        #   因此麦克风数据只会进入本次录音自己的队列。
+        target_queue = self.state.active_recording_queue
+        if self.app.loop and target_queue:
             asyncio.run_coroutine_threadsafe(
-                self.state.queue_in.put({
+                target_queue.put({
                     'type': 'data',
                     'time': time.time(),
                     'data': indata.copy(),

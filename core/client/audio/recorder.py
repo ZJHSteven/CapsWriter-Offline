@@ -79,7 +79,7 @@ class AudioRecorder:
             self.state.pop_audio_file(message.task_id)
             # 具体错误日志由 WebSocketManager 记录
     
-    async def record_and_send(self) -> None:
+    async def record_and_send(self, queue: Optional[asyncio.Queue] = None) -> None:
         """
         录音并发送数据
         
@@ -100,9 +100,14 @@ class AudioRecorder:
             if Config.save_audio:
                 self._file_manager = AudioFileManager()
             
-            # 从队列读取数据
-            while task := await self.state.queue_in.get():
-                self.state.queue_in.task_done()
+            # 从本次会话队列读取数据。
+            #
+            # queue 为 None 时回退到 state.queue_in，保留兼容性；
+            # 正常麦克风听写路径会传入 ShortcutTask 创建的 session_queue。
+            input_queue = queue or self.state.queue_in
+
+            while task := await input_queue.get():
+                input_queue.task_done()
                 
                 if task['type'] == 'begin':
                     self._start_time = task['time']

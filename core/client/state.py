@@ -63,6 +63,14 @@ class ClientState:
     recording_start_time: float = 0.0
     audio_files: Dict[str, Path] = field(default_factory=dict)
 
+    # 当前录音会话专用队列。
+    #
+    # 旧实现只有一个全局 queue_in。只要旧 AudioRecorder 还没有完全退出，
+    # 新录音又启动，就可能出现多个 recorder 同时从 queue_in 抢 begin/data/finish。
+    # 抢队列会导致 data 和 final 使用不同 task_id，表现为长录音前文丢失，
+    # 或旧识别结果串到新识别结果前面。
+    active_recording_queue: Optional[asyncio.Queue] = None
+
     # 最近一次识别结果（用于手动添加纠错记录）
     last_recognition_text: Optional[str] = None
     
@@ -105,16 +113,25 @@ class ClientState:
         
         logger.debug("客户端状态重置完成")
     
-    def start_recording(self, start_time: float) -> None:
+    def start_recording(self, start_time: float, queue: Optional[asyncio.Queue] = None) -> bool:
         """
         开始录音
         
         Args:
             start_time: 录音开始的时间戳
+
+        Returns:
+            True 表示成功进入录音状态；False 表示已有录音正在进行，本次启动被拒绝。
         """
+        if self.recording:
+            logger.warning("已有录音会话正在进行，忽略新的录音启动请求")
+            return False
+
         self.recording = True
         self.recording_start_time = start_time
+        self.active_recording_queue = queue or self.queue_in
         logger.debug(f"录音状态已更新: recording=True, start_time={start_time:.2f}")
+        return True
     
     def stop_recording(self) -> float:
         """
@@ -129,6 +146,7 @@ class ClientState:
         
         self.recording = False
         self.recording_start_time = 0.0
+        self.active_recording_queue = None
         logger.debug(f"录音状态已更新: recording=False, duration={duration:.2f}s")
         return duration
     
@@ -176,6 +194,5 @@ class ClientState:
             text: 输出文本内容
         """
         self.last_output_text = text
-
 
 
