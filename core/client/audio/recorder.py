@@ -82,7 +82,7 @@ class AudioRecorder:
     async def record_and_send(self) -> None:
         """
         录音并发送数据
-        
+
         从队列中读取音频数据，保存到文件（如果启用），
         并发送到服务端进行识别。
         """
@@ -90,7 +90,7 @@ class AudioRecorder:
             # 生成唯一任务 ID
             self.task_id = str(uuid.uuid1())
             logger.debug(f"创建录音任务，任务ID: {self.task_id}")
-            
+
             self._start_time = 0.0
             self._duration = 0.0
             self._cache = []
@@ -199,7 +199,26 @@ class AudioRecorder:
                     )
                     asyncio.create_task(self._send_message(message))
                     break
-                    
+
+        except asyncio.CancelledError:
+            # 录音被取消（短按时间过短 / 单击模式超时取消）。
+            # 此时本会话的 begin 以及阈值前积攒的 data 可能还残留在全局
+            # queue_in 中，而该队列由所有录音会话共用。若不清理，下一次
+            # record_and_send() 会读到带旧 task_id 语义的脏数据，导致
+            # 「前文丢失 / 旧结果混入」的串线问题。
+            drained = 0
+            while True:
+                try:
+                    self.state.queue_in.get_nowait()
+                    self.state.queue_in.task_done()
+                    drained += 1
+                except asyncio.QueueEmpty:
+                    break
+            logger.debug(
+                f"录音任务被取消，已排空队列残留 {drained} 条，任务ID: {self.task_id}"
+            )
+            raise
+
         except Exception as e:
             logger.error(f"录音任务错误: {e}", exc_info=True)
     
